@@ -1,3 +1,66 @@
+
+import sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, to_date, lit, sum as _sum
+
+def main():
+    HDFS_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/Cbs_balance"
+
+    try:
+        spark = SparkSession.builder \
+            .appName("CBS Balance Validation") \
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+            .getOrCreate()
+
+        # Define business dates
+        today = "2025-12-02"
+        yesterday = "2025-12-01"
+
+        df = spark.read.format("delta").load(HDFS_PATH)
+
+        df_yesterday = df.filter(to_date(col("BALANCE_DATE")) == to_date(lit(yesterday))) \
+                         .select("GLCC", col("closing_balance").alias("yest_balance"))
+
+        df_today = df.filter(to_date(col("BALANCE_DATE")) == to_date(lit(today))) \
+                     .select("GLCC", col("closing_balance").alias("today_balance"))
+
+        # Join both days
+        comparison_df = df_yesterday.join(df_today, on="GLCC", how="inner") \
+                         .withColumn("difference", col("today_balance") - col("yest_balance"))
+
+        print("=============== Balance Comparison Results ===============")
+        comparison_df.show(50, False)
+
+        # Show mismatched balances (difference NOT zero)
+        print("=============== Mismatch Records ===============")
+        mismatch_df = comparison_df.filter(col("difference") != 0)
+        mismatch_df.show(50, False)
+
+        print("=============== Summary Counts ===============")
+        print("Total GLCC entries:", comparison_df.count())
+        print("Mismatch entries:", mismatch_df.count())
+
+    except Exception as e:
+        print(f"Error validating balances: {e}")
+        sys.exit(1)
+    finally:
+        if 'spark' in locals():
+            spark.stop()
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
 import sys
 import concurrent.futures
 from pyspark.sql.functions import expr, col, when, trim, substring, lit, sum, to_date
