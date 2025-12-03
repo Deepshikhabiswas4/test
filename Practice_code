@@ -1,229 +1,29 @@
-import sys
-import concurrent.futures
-from pyspark.sql.functions import expr, col, when, trim, substring, lit, sum, to_date
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, FloatType
-from datetime import date, timedelta
-from pyspark.sql import SparkSession , functions as F
-from pyspark.storagelevel import StorageLevel
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import to_date, col, lit
 
-# --- Configuration & Date Setup ---
-today = date.today()
-yesterday = today - timedelta(days=1) 
-posting_date_str = today.strftime("%Y-%m-%d")
-print("BALANCE DATE",posting_date_str)
-yesterday_str = yesterday.strftime("%Y-%m-%d")
+oracle_url = "jdbc:oracle:thin:@//10.177.103.192:1523/fincorepdb1"
+oracle_user = "fincore"
+oracle_password = "Password#1234"
+oracle_driver = "oracle.jdbc.driver.OracleDriver"
+
 HDFS_BASE = "hdfs://10.177.103.199:8022"
-CBS_BALANCE_DATALAKE_PATH_2= f"{HDFS_BASE}/data-lake/Fincore/CBS_balance"#reading data
-CBS_BALANCE_DATALAKE_PATH = f"{HDFS_BASE}/data-lake/Fincore/Cbs_balance"#writing
-SOURCE_BASE_PATH = f"{HDFS_BASE}/CBS-FILES/2025-11-20/BANCS24/"
+CBS_BALANCE_DATALAKE_PATH_2 = f"{HDFS_BASE}/data-lake/Fincore/CBS_balance"
 
+spark = SparkSession.builder.appName("Migrate_Oracle_2ndDec").getOrCreate()
 
+df_dec2 = spark.read \
+    .format("jdbc") \
+    .option("url", oracle_url) \
+    .option("dbtable", "CBS_BALANCE") \
+    .option("user", oracle_user) \
+    .option("password", oracle_password) \
+    .option("driver", oracle_driver) \
+    .load() \
+    .filter(to_date(col("BALANCE_DATE")) == to_date(lit("2025-12-02")))
 
-def create_spark_session(app_name, hdfs_uri):
-    """
-    Creates and returns a SparkSession with Delta Lake configurations.
-    JDBC jars path is removed as we are writing to Delta Lake now.
-    """
-    return (
-        SparkSession.builder.appName(app_name)
-        .config("spark.hadoop.fs.defaultFS", hdfs_uri)
-        # Adding Delta Lake configurations
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
+df_dec2.write \
+    .format("delta") \
+    .mode("append") \
+    .save(CBS_BALANCE_DATALAKE_PATH_2)
 
-def invtogl(spark):
-    """ Reads inv data from HDFS, processes it, and returns a standardized DataFrame. """
-    print("Starting processing of invtogl files.")
-    try:
-        df_raw = spark.read.text(f"{HDFS_BASE}/CBS-FILES/2025-11-28/BANCS24/INV*")
-        id_col = expr("substring(value, 200, 18)")
-        amount_str = expr("substring(value, 30, 17)")
-        value_type = expr("substring(value, 47, 1)")
-        df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "+", trim(amount_str).cast(DecimalType(22,4)) / 1000)
-            .when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(22,4)) / 1000)
-            .otherwise(0)
-            .alias("Amount"),
-        ).select("Id", "Amount")
-        print("Successfully processed invtogl data.")
-        return df_final
-    except Exception as e:
-        print(f"Error processing invtogl files: {e}")
-        raise
-
-def bortogl(spark):
-    """ Reads bor data from HDFS, processes it, and returns a standardized DataFrame. """
-    print("Starting processing of bortogl files.")
-    try:
-        df_raw = spark.read.text(f"{HDFS_BASE}/CBS-FILES/2025-11-28/BANCS24/BOR*")
-        id_col = expr("substring(value, 105, 18)")
-        amount_str = expr("substring(value, 27, 17)")
-        value_type = expr("substring(value, 44, 1)")
-        df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "+", trim(amount_str).cast(DecimalType(22,4)) / 1000)
-            .when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(22,4)) / 1000)
-            .otherwise(0)
-            .alias("Amount"),
-        ).select("Id", "Amount")
-        print("Successfully processed bortogl data.")
-        return df_final
-    except Exception as e:
-        print(f"Error processing bortogl files: {e}")
-        raise
-
-def glccgen(spark):
-    """ Reads glccgen data from HDFS, processes it, and returns a standardized DataFrame. """
-    print("Starting processing of glccgen files.")
-    try:
-        df_raw = spark.read.text(f"{HDFS_BASE}/CBS-FILES/2025-11-28/BANCS24/GLCC*")
-        id_col = expr("substring(value, 1, 18)")
-        amount_str = expr("substring(value, 24, length(value)-24)")
-        value_type = expr("substring(value, length(value), 1)")
-        df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "+", trim(amount_str).cast(DecimalType(22,4)) / 10000)
-            .when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(22,4)) / 10000)
-            .otherwise(0)
-            .alias("Amount"),
-        ).select("Id", "Amount")
-        print("Successfully processed glccgen data.")
-        return df_final
-    except Exception as e:
-        print(f"Error processing glccgen files: {e}")
-        raise
-
-if __name__ == "__main__":
-    spark = create_spark_session(
-        "HDFS_Text_to_DataLake",
-        HDFS_BASE
-    )
-
-    try:
-        # Using ThreadPoolExecutor for parallel reading of raw files
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            df_invtogl = executor.submit(invtogl, spark)
-            df_bortogl = executor.submit(bortogl, spark)
-            df_glccgen = executor.submit(glccgen, spark)
-            concurrent.futures.wait([df_invtogl, df_bortogl, df_glccgen])
-            
-            # Raising exceptions if any failed
-            if df_invtogl.exception(): raise df_invtogl.exception()
-            if df_bortogl.exception(): raise df_bortogl.exception()
-            if df_glccgen.exception(): raise df_glccgen.exception()    
-              
-            df_invtogl_result = df_invtogl.result()
-            df_bortogl_result = df_bortogl.result()
-            df_glccgen_result = df_glccgen.result()
-
-            final_df = df_invtogl_result.unionByName(df_bortogl_result).unionByName(df_glccgen_result)
-            final_result_df = final_df.groupBy("Id").agg(F.sum("Amount").alias("Amount")).select("Id", "Amount")
-
-            print("===================== Daily Transaction Summary ============= ")
-            # final_result_df.show(20, False)
-            
-            # df_mapped = final_result_df.withColumn("BRANCH_CODE", substring(col("Id"), 1, 5)) \
-            #      .withColumn("CURRENCY", substring(col("Id"), 6, 3)) \
-            #      .withColumn("CGL", substring(col("Id"), 9, 10))
-            
-            # # The 'processed_df' contains today's movements, structured like the final balance schema
-            # processed_df = df_mapped.withColumnRenamed("Amount", "BALANCE").select("CGL", "BALANCE", "CURRENCY", "BRANCH_CODE")
-
-            print("========================Processed daily movements============")
-            # processed_df.show(20, False)
-
-    except Exception as e:
-       print(f"An error occurred during raw file processing: {e}")
-       sys.exit(1)
-
-
-    try:
-        # --- PHASE 2: CALCULATING CLOSING BALANCE USING DELTA LAKE ---
-
-        # Reading yesterday's balance from the Delta Lake
-        print(f"\n--- Reading yesterday's balance from Delta Lake: {CBS_BALANCE_DATALAKE_PATH_2} (Date: {yesterday_str}) ---")
-        
-        df_date_filtered = spark.read.format("delta").load(CBS_BALANCE_DATALAKE_PATH_2) \
-            .filter(to_date(col("BALANCE_DATE")) == to_date(lit(yesterday_str)))
-
-        df_today_transactions_for_balance = final_result_df.select(
-            col("Id").alias("GLCC"),
-            (col("Amount").cast(DecimalType(22, 3)).alias("BALANCE_AMOUNT_TEMP") )
-        )
-        # df_today_transactions_for_balance.show(20, False)
-        df_yesterday_filtered = df_date_filtered.select(
-            "GLCC", 
-            col("closing_balance").cast(DecimalType(22, 3)).alias("BALANCE_AMOUNT_TEMP") 
-        )    
-
-        # df_yesterday_filtered.show(20, False)
-        print("==============Fetched Dataframe from Data Lake======================")
-        # df_date_filtered.show(10,False)
-
-        # # Union today's movements with yesterday's closing balance
-        # df_date_filtered_schema = df_date_filtered.selectExpr(select_cols_gl)
-
-        
-        combined_df = df_today_transactions_for_balance.unionAll(df_yesterday_filtered)
-        # combined_df.show(20, False)
-        
-        # Aggregate to calculate today's *new* closing balance
-        final_aggregated_df = combined_df.groupBy("GLCC").agg(
-            sum("BALANCE_AMOUNT_TEMP").cast(DecimalType(22, 3)).alias("closing_balance") 
-        ).withColumn("BALANCE_DATE", to_date(lit(posting_date_str))) # Add today's date
-
-        print("==========================Final Balance Dataframe ready for Write=================")
-        # final_aggregated_df.show(50,False)
-        
-        
-        # The schema now needs to match (BALANCE_DATE, GLCC, closing_balance, CURRENCY, BRANCH_CODE)
-        final_aggregated_df.write \
-            .format("delta") \
-            .mode("append") \
-            .save(CBS_BALANCE_DATALAKE_PATH)
-
-        print(f"Successfully wrote today's balances to Delta Lake: {CBS_BALANCE_DATALAKE_PATH}")
-    except Exception as e:
-       print(f"An error occurred during the balance calculation or Delta Lake write: {e}")
-       sys.exit(1)
-
-
-
-# =======================================================================================================
-
-    try: 
-
-        # Writing data into Oracle 
-        df_mapped = final_aggregated_df.withColumn("BRANCH_CODE", substring(col("GLCC"), 1, 5)) \
-                    .withColumn("CURRENCY", substring(col("GLCC"), 6, 3)) \
-                    .withColumn("CGL", substring(col("GLCC"), 9, 10))
-        # df_mapped.show(20, False)           
-        df_final_schema = df_mapped.select("BRANCH_CODE", "CURRENCY", "CGL","BALANCE_DATE","closing_balance")
-        processed_df = df_final_schema.withColumnRenamed("closing_balance", "BALANCE").select("CGL", "BALANCE_DATE","BALANCE", "CURRENCY", "BRANCH_CODE")
-        # processed_df.show(20, False)    
-        print("==========================Final Dataframe=================")    
-
-        oracle_url = "jdbc:oracle:thin:@//10.177.103.192:1523/fincorepdb1"
-        oracle_user = "fincore"
-        oracle_password = "Password#1234"
-        oracle_driver = "oracle.jdbc.driver.OracleDriver"   
-        processed_df.write \
-            .format("jdbc") \
-            .option("url", oracle_url) \
-            .option("dbtable", "CBS_BALANCE") \
-            .option("user", oracle_user) \
-            .option("password", oracle_password) \
-            .option("driver", oracle_driver) \
-            .option("batchsize", 110000) \
-            .option("numPartitions", 50) \
-            .mode("append") \
-            .save()
-    except Exception as e:
-        print(f"An error occurred during the overall process: {e}")
-        
-    finally:
-        if spark:
-            spark.stop()
+spark.stop()
