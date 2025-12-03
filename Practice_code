@@ -27,3 +27,9 @@ df_dec2.write \
     .save(CBS_BALANCE_DATALAKE_PATH_2)
 
 spark.stop()
+
+
+spark-submit \
+ --jars ojdbc8.jar \
+ --driver-class-path ojdbc8.jar \
+ datamigrate.py
