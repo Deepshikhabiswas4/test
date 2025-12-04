@@ -1,50 +1,68 @@
 import sys
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
-from datetime import date, timedelta
+from pyspark.sql.functions import col, to_date, lit
+from datetime import date
 
 def main():
-    # Define the path where the Delta Lake table is saved
+    # HDFS table path
     HDFS_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/Gl_Balance"
 
+    # Business date
+    today = "2025-12-02"
+
     try:
-        # Initialize Spark Session with Delta Lake support
+        # Spark session with Delta support
         spark = SparkSession.builder \
-            .appName("Read GL Balance Delta Lake Table") \
+            .appName("GL Balance Mismatch Check") \
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
             .getOrCreate()
-        
-        print(f"Attempting to read Delta Lake table from: {HDFS_PATH}")
 
-        # Read the Delta Lake data into a DataFrame
-        df_delta_read = spark.read.format("delta").load(HDFS_PATH)
+        print(f"Reading Delta Lake data from: {HDFS_PATH}")
+        df_delta = spark.read.format("delta").load(HDFS_PATH)
 
-        # Count the rows in the Delta Lake table
-        row_count = df_delta_read.count()
-        print(f"Successfully read Delta Lake table.")
-        print(f"Total rows in the Delta Lake table: {row_count}")
+        # Filter Delta data for today's records
+        df_today_delta = df_delta.filter(to_date(col("BALANCE_DATE")) == to_date(lit(today))) \
+                                 .select("GLCC", col("closing_balance").alias("delta_balance"))
 
-        # Display the schema and a sample of the data
-        # print("\nDataFrame Schema:")
-        # df_delta_read.printSchema()
+        print("Delta Table Sample Data:")
+        df_today_delta.show(20, False)
 
-        print("\nData Sample (5 rows):")
-        df_delta_read.show(20, False)
+        # Read from Oracle database
+        jdbc_url = "jdbc:oracle:thin:@//<HOST>:<PORT>/<SERVICE>"
+        db_properties = {
+            "user": "<USERNAME>",
+            "password": "<PASSWORD>",
+            "driver": "oracle.jdbc.driver.OracleDriver"
+        }
 
-        # Optional: You can filter the data based on the BALANCE_DATE column you added
-        # Example: Show only records stamped as 'yesterday'
-        # from datetime import date, timedelta
-        # yesterday = date.today() - timedelta(days=1)
-        # df_yesterday = df_delta_read.filter(col("BALANCE_DATE") == yesterday)
-        # print(f"\nRows for yesterday ({yesterday}): {df_yesterday.count()}")
-        # df_yesterday.show()
+        print("Reading today's balance from Oracle database...")
+        query = f"(SELECT GLCC, CLOSING_BALANCE FROM GL_BALANCE WHERE BALANCE_DATE = DATE '{today}') alias"
+        df_oracle = spark.read.jdbc(url=jdbc_url, table=query, properties=db_properties) \
+                           .select("GLCC", col("CLOSING_BALANCE").alias("db_balance"))
+
+        print("Oracle Database Sample Data:")
+        df_oracle.show(20, False)
+
+        # Compare both datasets
+        comparison_df = df_today_delta.join(df_oracle, on="GLCC", how="fullouter") \
+                                      .withColumn("difference", col("delta_balance") - col("db_balance"))
+
+        print("\n========= MISMATCH RECORDS =========")
+        mismatch_df = comparison_df.filter(col("difference") != 0)
+        mismatch_df.show(50, False)
+
+        print("\n========= SUMMARY =========")
+        print("Total Delta records: ", df_today_delta.count())
+        print("Total DB records: ", df_oracle.count())
+        print("Mismatch count: ", mismatch_df.count())
 
     except Exception as e:
-        print(f"An error occurred while reading the Delta Lake table: {e}")
+        print(f"Error validating GL Balance: {e}")
         sys.exit(1)
+
     finally:
-        if 'spark' in locals() and spark:
+        if 'spark' in locals():
             spark.stop()
 
 if __name__ == "__main__":
