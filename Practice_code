@@ -1,69 +1,123 @@
+#!/usr/bin/env python3
+ 
+from pyspark.sql import SparkSession, functions as F, types as T # Note the 'as F'
+from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, IntegerType
+import traceback
 import sys
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_date, lit
-from datetime import date
+from datetime import date, timedelta
+ 
+def print_header(msg):
+    print("\n" + "="*6 + " " + msg + " " + "="*6 + "\n")
+ 
+# --- Optimization Function for Parallel Reads ---
+def read_table_parallel_by_rownum(spark, jdbc_url, user, password, driver,
+                                 difference, select_cols_sql, recon_date,
+                                 branch_filter, num_partitions, fetchsize):
+   
+    subquery = (
+        "(\n"
+        "  SELECT\n"
+        "    {cols},\n"
+        "    ROW_NUMBER() OVER (ORDER BY (BRANCH_CODE || '|' || CURRENCY || '|' || CGL)) rn\n"
+        "  FROM {table}\n"
+        "  WHERE BALANCE_DATE = TO_DATE('{date}','DD-MM-YY')\n"
+        ") tmp"
+    ).format(cols=select_cols_sql, 
+             table=difference, 
+             date=recon_date,
+             branch_code_val=branch_filter)
+   
+    print("################# PREDICATE PUSHDOWN QUERY #######################")
+    print(subquery)
+    print("##################################################################")
+   
+    ESTIMATED_UPPER_BOUND = 1000000
+    
+    df = (
+        spark.read.format("jdbc")
+            .option("url", jdbc_url)
+            .option("dbtable", subquery)
+            .option("user", user)
+            .option("password", password)
+            .option("driver", driver)
+            .option("partitionColumn", "rn")
+            .option("lowerBound", 1)
+            .option("upperBound", ESTIMATED_UPPER_BOUND)
+            .option("numPartitions", str(num_partitions)) 
+            .option("fetchsize", str(fetchsize))
+            .load()
+    )
+    return df
 
 def main():
-    # HDFS table path
-    HDFS_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/Gl_Balance"
-
-    # Business date
-    today = "2025-12-02"
-
     try:
-        # Spark session with Delta support
-        spark = SparkSession.builder \
-            .appName("GL Balance Mismatch Check") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .getOrCreate()
+        spark = (
+            SparkSession.builder
+                .appName("Optimized Difference Amount Extract to Delta Lake")
+                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+                .getOrCreate()
+        )
+ 
+        spark.conf.set("spark.sql.adaptive.enabled", "true")
+        spark.conf.set("spark.sql.shuffle.partitions", "200") 
 
-        print(f"Reading Delta Lake data from: {HDFS_PATH}")
-        df_delta = spark.read.format("delta").load(HDFS_PATH)
+        # --- Configuration ---
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+        
+        ORACLE_QUERY_DATE = "20-11-25"
+        TARGET_DATE_VALUE = yesterday
+        BRANCH_FILTER_VALUE = '5632356'
+        HDFS_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/DiffrenceTable"
 
-        # Filter Delta data for today's records
-        df_today_delta = df_delta.filter(to_date(col("BALANCE_DATE")) == to_date(lit(today))) \
-                                 .select("GLCC", col("closing_balance").alias("delta_balance"))
+        ORACLE_USER = "fincore"
+        ORACLE_PASSWORD = "Password#1234"
+        ORACLE_DRIVER = "oracle.jdbc.driver.OracleDriver"
+        JDBC_URL = "jdbc:oracle:thin:@//10.177.103.192:1523/fincorepdb1"
 
-        print("Delta Table Sample Data:")
-        df_today_delta.show(20, False)
+        NUM_PARTITIONS_READ = 5
+        FETCHSIZE = 20000 
+        select_cols_gl = "BRANCH_CODE || CURRENCY || CGL AS GLCC, BALANCE AS closing_balance, BRANCH_CODE" 
+        print_header("START DIFFERENCE AMOUNT data Extraction")
+       
+        df_gl = read_table_parallel_by_rownum(
+            spark, JDBC_URL, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DRIVER,
+            "DIFFERENCE", select_cols_gl, ORACLE_QUERY_DATE, BRANCH_FILTER_VALUE, 
+            NUM_PARTITIONS_READ, FETCHSIZE
+        )
+ 
+        print(f"Total records fetched: {df_gl.count()}")
 
-        # Read from Oracle database
-        jdbc_url = "jdbc:oracle:thin:@//<HOST>:<PORT>/<SERVICE>"
-        db_properties = {
-            "user": "<USERNAME>",
-            "password": "<PASSWORD>",
-            "driver": "oracle.jdbc.driver.OracleDriver"
-        }
+        # Final preparation: select final columns and set the correct target date value
+        # FIX: Use F.lit() instead of lit()
+        df_final = df_gl.select(
+            F.lit(TARGET_DATE_VALUE).alias("BALANCE_DATE").cast("date"),
+            F.col("GLCC"),
+            F.col("closing_balance").cast(DecimalType(22, 3))
+        )
 
-        print("Reading today's balance from Oracle database...")
-        query = f"(SELECT GLCC, CLOSING_BALANCE FROM GL_BALANCE WHERE BALANCE_DATE = DATE '{today}') alias"
-        df_oracle = spark.read.jdbc(url=jdbc_url, table=query, properties=db_properties) \
-                           .select("GLCC", col("CLOSING_BALANCE").alias("db_balance"))
+        print_header("WRITE TO DELTA LAKE (HDFS)")
+        
+        df_final.write \
+            .format("delta") \
+            .mode("append") \
+            .save(HDFS_PATH)
 
-        print("Oracle Database Sample Data:")
-        df_oracle.show(20, False)
-
-        # Compare both datasets
-        comparison_df = df_today_delta.join(df_oracle, on="GLCC", how="fullouter") \
-                                      .withColumn("difference", col("delta_balance") - col("db_balance"))
-
-        print("\n========= MISMATCH RECORDS =========")
-        mismatch_df = comparison_df.filter(col("difference") != 0)
-        mismatch_df.show(50, False)
-
-        print("\n========= SUMMARY =========")
-        print("Total Delta records: ", df_today_delta.count())
-        print("Total DB records: ", df_oracle.count())
-        print("Mismatch count: ", mismatch_df.count())
-
+        print(f"Successfully appended data to Delta Lake at: {HDFS_PATH}")
+        print_header("JOB COMPLETE")
+       
+        spark.stop()
+ 
     except Exception as e:
-        print(f"Error validating GL Balance: {e}")
-        sys.exit(1)
-
-    finally:
-        if 'spark' in locals():
+        print("ERROR during execution:")
+        traceback.print_exc()
+        try:
             spark.stop()
-
+        except:
+            pass
+        sys.exit(1)
+ 
 if __name__ == "__main__":
+    print("START MAIN")
     main()
