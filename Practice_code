@@ -78,18 +78,17 @@ def main():
         NUM_PARTITIONS_READ = 5
         FETCHSIZE = 20000
 
-        # Correct select columns
+      
         select_cols_gl = (
             "BRANCH_CODE || CURRENCY || CGL AS GLCC, "
-            "DIFFERENCE_AMOUNT, "
-            "BRANCH_CODE, CURRENCY, CGL"
+            "DIFFERENCE_AMOUNT"
         )
 
         print_header("START DIFFERENCE AMOUNT DATA EXTRACTION")
 
         df_gl = read_table_parallel_by_rownum(
             spark, JDBC_URL, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DRIVER,
-            "FINCORE.DIFFERENCE", select_cols_gl,
+            "DIFFERENCE", select_cols_gl,
             ORACLE_QUERY_DATE, NUM_PARTITIONS_READ, FETCHSIZE
         )
 
@@ -97,9 +96,6 @@ def main():
 
         df_final = df_gl.select(
             F.lit(TARGET_DATE_VALUE).alias("RECON_DATE").cast("date"),
-            F.col("BRANCH_CODE"),
-            F.col("CURRENCY"),
-            F.col("CGL"),
             F.col("GLCC"),
             F.col("DIFFERENCE_AMOUNT").cast(DecimalType(22, 3))
         )
@@ -110,6 +106,7 @@ def main():
             .format("delta") \
             .mode("append") \
             .save(HDFS_PATH)
+        # df_final.show(20, False)
 
         print(f"Successfully appended data to Delta Lake at: {HDFS_PATH}")
         print_header("JOB COMPLETE")
