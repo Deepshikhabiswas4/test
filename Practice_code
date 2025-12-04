@@ -2,6 +2,7 @@
 
 from pyspark.sql import SparkSession, functions as F, types as T
 from pyspark.sql.types import DecimalType
+from delta.tables import DeltaTable
 import traceback
 import sys
 from datetime import date, timedelta
@@ -53,7 +54,7 @@ def main():
     try:
         spark = (
             SparkSession.builder
-                .appName("Optimized Difference Amount Extract to Delta Lake")
+                .appName("TRUNCATE Delta Difference Table")
                 .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                 .getOrCreate()
@@ -78,39 +79,17 @@ def main():
         NUM_PARTITIONS_READ = 5
         FETCHSIZE = 20000
 
-      
-        select_cols_gl = (
-            "BRANCH_CODE || CURRENCY || CGL AS GLCC, "
-            "DIFFERENCE_AMOUNT"
-        )
+        print_header("TRUNCATE DELTA TABLE (REMOVE ALL DATA)")
 
-        print_header("START DIFFERENCE AMOUNT DATA EXTRACTION")
+        # -------- TRUNCATE DELTA TABLE --------
+        if DeltaTable.isDeltaTable(spark, HDFS_PATH):
+            delta_tbl = DeltaTable.forPath(spark, HDFS_PATH)
+            delta_tbl.delete("true")
+            print("All data removed successfully — schema retained.")
+        else:
+            print("Delta table does not exist at given HDFS path — no truncate required.")
 
-        df_gl = read_table_parallel_by_rownum(
-            spark, JDBC_URL, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DRIVER,
-            "DIFFERENCE", select_cols_gl,
-            ORACLE_QUERY_DATE, NUM_PARTITIONS_READ, FETCHSIZE
-        )
-
-        print(f"Total records fetched: {df_gl.count()}")
-
-        df_final = df_gl.select(
-            F.lit(TARGET_DATE_VALUE).alias("RECON_DATE").cast("date"),
-            F.col("GLCC"),
-            F.col("DIFFERENCE_AMOUNT").cast(DecimalType(22, 3))
-        )
-
-        print_header("WRITE TO DELTA LAKE (HDFS)")
-
-        df_final.write \
-            .format("delta") \
-            .mode("append") \
-            .save(HDFS_PATH)
-        # df_final.show(20, False)
-
-        print(f"Successfully appended data to Delta Lake at: {HDFS_PATH}")
         print_header("JOB COMPLETE")
-
         spark.stop()
 
     except Exception:
