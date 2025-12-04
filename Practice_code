@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
- 
-from pyspark.sql import SparkSession, functions as F, types as T # Note the 'as F'
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, IntegerType
+
+from pyspark.sql import SparkSession, functions as F, types as T
+from pyspark.sql.types import DecimalType
 import traceback
 import sys
 from datetime import date, timedelta
- 
+
 def print_header(msg):
     print("\n" + "="*6 + " " + msg + " " + "="*6 + "\n")
- 
-# --- Optimization Function for Parallel Reads ---
-def read_table_parallel_by_rownum(spark, jdbc_url, user, password, driver,
-                                 difference, select_cols_sql, recon_date,
-                                 branch_filter, num_partitions, fetchsize):
-   
+
+def read_table_parallel_by_rownum(
+    spark, jdbc_url, user, password, driver,
+    difference, select_cols_sql, recon_date,
+    num_partitions, fetchsize
+):
+
     subquery = (
         "(\n"
         "  SELECT\n"
         "    {cols},\n"
         "    ROW_NUMBER() OVER (ORDER BY (BRANCH_CODE || '|' || CURRENCY || '|' || CGL)) rn\n"
         "  FROM {table}\n"
-        "  WHERE BALANCE_DATE = TO_DATE('{date}','DD-MM-YY')\n"
+        "  WHERE RECON_RUN_DATE = TO_DATE('{date}','DD-MM-YY')\n"
         ") tmp"
-    ).format(cols=select_cols_sql, 
-             table=difference, 
-             date=recon_date,
-             branch_code_val=branch_filter)
-   
+    ).format(cols=select_cols_sql,
+             table=difference,
+             date=recon_date)
+
     print("################# PREDICATE PUSHDOWN QUERY #######################")
     print(subquery)
     print("##################################################################")
-   
+
     ESTIMATED_UPPER_BOUND = 1000000
-    
+
     df = (
         spark.read.format("jdbc")
             .option("url", jdbc_url)
@@ -43,7 +43,7 @@ def read_table_parallel_by_rownum(spark, jdbc_url, user, password, driver,
             .option("partitionColumn", "rn")
             .option("lowerBound", 1)
             .option("upperBound", ESTIMATED_UPPER_BOUND)
-            .option("numPartitions", str(num_partitions)) 
+            .option("numPartitions", str(num_partitions))
             .option("fetchsize", str(fetchsize))
             .load()
     )
@@ -58,17 +58,16 @@ def main():
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                 .getOrCreate()
         )
- 
+
         spark.conf.set("spark.sql.adaptive.enabled", "true")
-        spark.conf.set("spark.sql.shuffle.partitions", "200") 
+        spark.conf.set("spark.sql.shuffle.partitions", "200")
 
         # --- Configuration ---
         today = date.today()
         yesterday = today - timedelta(days=1)
-        
+
         ORACLE_QUERY_DATE = "20-11-25"
         TARGET_DATE_VALUE = yesterday
-        BRANCH_FILTER_VALUE = '5632356'
         HDFS_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/DiffrenceTable"
 
         ORACLE_USER = "fincore"
@@ -77,28 +76,36 @@ def main():
         JDBC_URL = "jdbc:oracle:thin:@//10.177.103.192:1523/fincorepdb1"
 
         NUM_PARTITIONS_READ = 5
-        FETCHSIZE = 20000 
-        select_cols_gl = "BRANCH_CODE || CURRENCY || CGL AS GLCC, BALANCE AS closing_balance, BRANCH_CODE" 
-        print_header("START DIFFERENCE AMOUNT data Extraction")
-       
+        FETCHSIZE = 20000
+
+        # Correct select columns
+        select_cols_gl = (
+            "BRANCH_CODE || CURRENCY || CGL AS GLCC, "
+            "DIFFERENCE_AMOUNT, "
+            "BRANCH_CODE, CURRENCY, CGL"
+        )
+
+        print_header("START DIFFERENCE AMOUNT DATA EXTRACTION")
+
         df_gl = read_table_parallel_by_rownum(
             spark, JDBC_URL, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DRIVER,
-            "DIFFERENCE", select_cols_gl, ORACLE_QUERY_DATE, BRANCH_FILTER_VALUE, 
-            NUM_PARTITIONS_READ, FETCHSIZE
+            "FINCORE.DIFFERENCE", select_cols_gl,
+            ORACLE_QUERY_DATE, NUM_PARTITIONS_READ, FETCHSIZE
         )
- 
+
         print(f"Total records fetched: {df_gl.count()}")
 
-        # Final preparation: select final columns and set the correct target date value
-        # FIX: Use F.lit() instead of lit()
         df_final = df_gl.select(
-            F.lit(TARGET_DATE_VALUE).alias("BALANCE_DATE").cast("date"),
+            F.lit(TARGET_DATE_VALUE).alias("RECON_DATE").cast("date"),
+            F.col("BRANCH_CODE"),
+            F.col("CURRENCY"),
+            F.col("CGL"),
             F.col("GLCC"),
-            F.col("closing_balance").cast(DecimalType(22, 3))
+            F.col("DIFFERENCE_AMOUNT").cast(DecimalType(22, 3))
         )
 
         print_header("WRITE TO DELTA LAKE (HDFS)")
-        
+
         df_final.write \
             .format("delta") \
             .mode("append") \
@@ -106,10 +113,10 @@ def main():
 
         print(f"Successfully appended data to Delta Lake at: {HDFS_PATH}")
         print_header("JOB COMPLETE")
-       
+
         spark.stop()
- 
-    except Exception as e:
+
+    except Exception:
         print("ERROR during execution:")
         traceback.print_exc()
         try:
@@ -117,7 +124,7 @@ def main():
         except:
             pass
         sys.exit(1)
- 
+
 if __name__ == "__main__":
     print("START MAIN")
     main()
