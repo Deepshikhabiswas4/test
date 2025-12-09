@@ -1,128 +1,13 @@
-import sys
-from datetime import date
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.functions import expr, col, substring
+from pyspark.sql import SparkSession
 
-# ----------------- Configuration & Date Setup -----------------
-today = date.today()
-posting_date_str = today.strftime("%Y-%m-%d")
-print("BALANCE DATE:", posting_date_str)
+spark = SparkSession.builder \
+    .appName("Truncate Delta Table") \
+    .getOrCreate()
 
-HDFS_BASE = "hdfs://10.177.103.199:8022"
-CBS_BALANCE_DATALAKE_PATH = f"{HDFS_BASE}/data-lake/Fincore/totalData/CBS_Data"
-SOURCE_BASE_PATH = f"{HDFS_BASE}/CBS-FILES/2025-11-28/BANCS24/"
+# Delta table path
+cbs_datalake_path = "your/datalake/path/cbs_delta_table"
 
-# ----------------- Spark Session Creation -----------------
-def create_spark_session(app_name, hdfs_uri):
-    """
-    Creates and returns a SparkSession with Delta Lake configurations.
-    """
-    spark = (
-        SparkSession.builder.appName(app_name)
-        .config("spark.hadoop.fs.defaultFS", hdfs_uri)
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-    )
-    return spark
+# Remove all rows but keep the structure & Delta log
+spark.sql(f"DELETE FROM delta.`{cbs_datalake_path}` WHERE true")
 
-# ----------------- File Processing Functions -----------------
-def invtogl(spark):
-    """
-    Reads inv data from HDFS, processes it, and returns a standardized DataFrame.
-    """
-    print("Starting processing of invtogl files.")
-    try:
-        df_raw = spark.read.text(f"{SOURCE_BASE_PATH}INV*")
-        df_processed = df_raw.select(
-            expr("substring(value, 4, 16)").alias("ACCT_NO"),
-            expr("substring(value, 20, 5)").alias("BR_NO"),
-            expr("substring(value, 25, 2)").alias("CURR_STATUS"),
-            expr("substring(value, 27, 3)").alias("CURRENCY"),
-            expr("substring(value, 48, 4)").alias("SGMT_CODE"),
-            expr("substring(value, 52, 4)").alias("ACCT_TYPE"),
-            expr("substring(value, 56, 4)").alias("INT_CAT"),
-            expr("substring(value, 196, 4)").alias("OD_STATUS"),
-            expr("substring(value, 200, 25)").alias("GL_CLASSIFICATION_CODE"),
-            expr("substring(value, 317, 17)").alias("CGL_COMPONENT_1_DR"),
-            expr("substring(value, 334, 10)").alias("CGL_COMPONENT_2_DR"),
-            expr("substring(value, 344, 17)").alias("CGL_COMPONENT_1_CR"),
-            expr("substring(value, 361, 10)").alias("CGL_COMPONENT_2_CR"),
-            expr("substring(value, 371, 1)").alias("OD_INDICATOR"),
-            expr("substring(value, 372, 1)").alias("OD_ALLOWED_THIS_PRODUCT"),
-        )
-        print("Successfully processed invtogl data.")
-        return df_processed
-    except Exception as e:
-        print(f"Error processing invtogl files: {e}")
-        raise
-
-def bortogl(spark):
-    """
-    Reads bor data from HDFS, processes it, and returns a standardized DataFrame.
-    """
-    print("Starting processing of bortogl files.")
-    try:
-        df_raw = spark.read.text(f"{SOURCE_BASE_PATH}DOR*")
-        df_processed = df_raw.select(
-            expr("substring(value, 4, 16)").alias("ACCT_NO"),
-            expr("substring(value, 20, 5)").alias("BR_NO"),
-            expr("substring(value, 25, 2)").alias("STAT"),
-            expr("substring(value, 51, 1)").alias("TERM_BASIS"),
-            expr("substring(value, 52, 4)").alias("MARKET_SEG_CODE"),
-            expr("substring(value, 56, 4)").alias("ACT_TYPE"),
-            expr("substring(value, 68, 4)").alias("CAT"),
-            expr("substring(value, 100, 3)").alias("CURRENCY_IND"),
-        )
-        print("Successfully processed bortogl data.")
-        return df_processed
-    except Exception as e:
-        print(f"Error processing bortogl files: {e}")
-        raise
-
-def glccgen(spark):
-    """
-    Reads glccgen data from HDFS, processes it, and returns a standardized DataFrame.
-    """
-    print("Starting processing of glccgen files.")
-    try:
-        df_raw = spark.read.text(f"{SOURCE_BASE_PATH}GLCC*")
-        # Assuming you will process it similarly, keeping as raw for now
-        df_processed = df_raw  # Modify if you have specific columns to extract
-        print("Successfully processed glccgen data.")
-        return df_processed
-    except Exception as e:
-        print(f"Error processing glccgen files: {e}")
-        raise
-
-# ----------------- Main Method -----------------
-if __name__ == "__main__":
-    try:
-        spark = create_spark_session("HDFS_Text_to_Datalake", HDFS_BASE)
-
-        # Read and process files
-        df_inv = invtogl(spark)
-        df_bor = bortogl(spark)
-        df_glcc = glccgen(spark)
-
-        # Optionally: merge/union them if needed
-        # final_df = df_inv.unionByName(df_bor).unionByName(df_glcc)  # Only if schema matches
-
-        # For now, writing them separately
-        df_inv.write.format("delta").mode("append").save(f"{CBS_BALANCE_DATALAKE_PATH}/INV")
-        df_bor.write.format("delta").mode("append").save(f"{CBS_BALANCE_DATALAKE_PATH}/BOR")
-        df_glcc.write.format("delta").mode("append").save(f"{CBS_BALANCE_DATALAKE_PATH}/GLCC")
-
-        print("Successfully wrote today's balances to Delta Lake.")
-
-        # Optional: Show some rows
-        df_inv.show(5, False)
-        df_bor.show(5, False)
-        df_glcc.show(5, False)
-
-    except Exception as e:
-        print(f"Error during processing/write: {e}")
-        sys.exit(1)
-    finally:
-        if spark:
-            spark.stop()
+print("All data removed successfully, structure retained.")
