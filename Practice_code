@@ -1,21 +1,46 @@
+import sys
 from pyspark.sql import SparkSession
+from datetime import date
 
-spark = SparkSession.builder \
-    .appName("Truncate CBS Delta Table") \
+# --- Configuration & Date Setup ---
+today = date.today()
+posting_date_str = today.strftime("%Y-%m-%d")
+print("BALANCE DATE", posting_date_str)
+
+HDFS_BASE = "hdfs://10.177.103.199:8022"
+CBS_BALANCE_DATALAKE_PATH = f"{HDFS_BASE}/data-lake/Fincore/totalData/CBS_Data"
+CBS_INV_DATALAKE_PATH     = f"{HDFS_BASE}/data-lake/Fincore/totalData/INV_Data"
+CBS_BOTGL_DATALAKE_PATH   = f"{HDFS_BASE}/data-lake/Fincore/totalData/BOTGL_Data"
+
+# ---------------- Spark Session Creation -------------------
+spark = (
+    SparkSession.builder.appName("TruncateDeltaPaths")
+    .config("spark.hadoop.fs.defaultFS", HDFS_BASE)
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     .getOrCreate()
+)
 
-CBS_BALANCE_DATALAKE_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/totalData/CBS_Data"
 
-# Read the table
-df = spark.read.format("delta").load(CBS_BALANCE_DATALAKE_PATH)
+def truncate_delta_path(path):
+    """Removes all rows but keeps schema and structure"""
+    print(f"Truncating data at path: {path}")
+    
+    # Read schema from delta
+    df = spark.read.format("delta").load(path)
+    
+    # Create empty dataframe with same schema
+    empty_df = df.limit(0)
+    
+    # Overwrite the data but retain the structure
+    empty_df.write.format("delta").mode("overwrite").save(path)
 
-# Create empty dataframe with same schema
-emptyDF = df.limit(0)
+    print(f"Successfully removed all data from: {path}\n")
 
-# Overwrite existing data but keep schema & delta log
-emptyDF.write.format("delta") \
-    .mode("overwrite") \
-    .option("overwriteSchema", "true") \
-    .save(CBS_BALANCE_DATALAKE_PATH)
 
-print("All data cleared successfully — structure kept & delta path unchanged.")
+# ----------- TRUNCATE ALL 3 DATALAKE PATHS ---------------
+truncate_delta_path(CBS_BALANCE_DATALAKE_PATH)
+truncate_delta_path(CBS_INV_DATALAKE_PATH)
+truncate_delta_path(CBS_BOTGL_DATALAKE_PATH)
+
+print("ALL DELTA DATA REMOVED SUCCESSFULLY — STRUCTURE RETAINED FOR ALL 3 DATASETS.")
