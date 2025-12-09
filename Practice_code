@@ -1,13 +1,21 @@
 from pyspark.sql import SparkSession
 
 spark = SparkSession.builder \
-    .appName("Truncate Delta Table") \
+    .appName("Truncate CBS Delta Table") \
     .getOrCreate()
 
-# Delta table path
-cbs_datalake_path = "your/datalake/path/cbs_delta_table"
+CBS_BALANCE_DATALAKE_PATH = "hdfs://10.177.103.199:8022/data-lake/Fincore/totalData/CBS_Data"
 
-# Remove all rows but keep the structure & Delta log
-spark.sql(f"DELETE FROM delta.`{cbs_datalake_path}` WHERE true")
+# Read the table
+df = spark.read.format("delta").load(CBS_BALANCE_DATALAKE_PATH)
 
-print("All data removed successfully, structure retained.")
+# Create empty dataframe with same schema
+emptyDF = df.limit(0)
+
+# Overwrite existing data but keep schema & delta log
+emptyDF.write.format("delta") \
+    .mode("overwrite") \
+    .option("overwriteSchema", "true") \
+    .save(CBS_BALANCE_DATALAKE_PATH)
+
+print("All data cleared successfully — structure kept & delta path unchanged.")
