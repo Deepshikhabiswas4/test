@@ -1,20 +1,28 @@
-from pyspark.sql import SparkSession
-from py4j.java_gateway import java_import
+def main(spark):
+    today_oracle_fmt = datetime.today().strftime("%d-%m-%Y")
 
-# Register Hadoop classes
-java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+    run_id = get_run_id(spark, today_oracle_fmt)
 
-# Create manifest locally
-manifest_filename = f"manifest_{today_str}_cbsbalance.txt"
-with open(manifest_filename, "w") as f:
-    f.write("cbs successful")
+    logger = create_logger(run_id)
 
-# HDFS destination
-hdfs_manifest_path = f"hdfs://10.177.103.199:8022/data-lake/Fincore/StreamLake/CBS_balance/{manifest_filename}"
+    logger.info("===================================")
+    logger.info("CBS BALANCE JOB STARTED")
+    logger.info(f"Run ID: {run_id}")
+    logger.info("===================================")
 
-# Upload to HDFS using Hadoop FS API
-fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-fs.copyFromLocalFile(False, True, spark._jvm.Path(manifest_filename), spark._jvm.Path(hdfs_manifest_path))
+    try:
+        logger.info("Reading data from Oracle")
+        # oracle read logic
 
-print(f"Manifest file uploaded to: {hdfs_manifest_path}")
+        logger.info("Writing to Delta Lake")
+        # delta write logic
+
+        logger.info("Job completed successfully")
+
+    except Exception as e:
+        logger.error("Job failed", exc_info=True)
+        raise
+
+    finally:
+        logger.info("CBS BALANCE JOB ENDED")
+
