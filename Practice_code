@@ -1,28 +1,29 @@
-def main(spark):
-    today_oracle_fmt = datetime.today().strftime("%d-%m-%Y")
+import os
+import logging
+from datetime import datetime
 
-    run_id = get_run_id(spark, today_oracle_fmt)
 
-    logger = create_logger(run_id)
+def create_logger(run_id):
+    today_str = datetime.today().strftime("%Y-%m-%d")
 
-    logger.info("===================================")
-    logger.info("CBS BALANCE JOB STARTED")
-    logger.info(f"Run ID: {run_id}")
-    logger.info("===================================")
+    log_dir = "/app/logs"
+    os.makedirs(log_dir, exist_ok=True)
 
-    try:
-        logger.info("Reading data from Oracle")
-        # oracle read logic
+    log_file = f"{log_dir}/cbsbalance_{today_str}_run_{run_id}.log"
 
-        logger.info("Writing to Delta Lake")
-        # delta write logic
+    logger_name = f"CBS_BALANCE_{run_id}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
-        logger.info("Job completed successfully")
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | run_id=%(run_id)s | %(message)s"
+    )
 
-    except Exception as e:
-        logger.error("Job failed", exc_info=True)
-        raise
+    if not logger.handlers:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
-    finally:
-        logger.info("CBS BALANCE JOB ENDED")
+    return logging.LoggerAdapter(logger, {"run_id": run_id})
 
