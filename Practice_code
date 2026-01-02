@@ -1,29 +1,40 @@
-import os
-import logging
-from datetime import datetime
+from pyspark.sql import SparkSession
+import sys
 
+def main():
 
-def create_logger(run_id):
-    today_str = datetime.today().strftime("%Y-%m-%d")
+    spark = SparkSession.builder \
+        .appName("HDFS_Read_Verification") \
+        .getOrCreate()
 
-    log_dir = "/app/logs"
-    os.makedirs(log_dir, exist_ok=True)
+    # Path will be given by your mentor
+    input_path = sys.argv[1]
 
-    log_file = f"{log_dir}/cbsbalance_{today_str}_run_{run_id}.log"
+    print(f"Trying to read files from path: {input_path}")
 
-    logger_name = f"CBS_BALANCE_{run_id}"
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    try:
+        # Step 1: Read files from HDFS
+        df = spark.read \
+            .option("header", "true") \
+            .option("inferSchema", "true") \
+            .csv(input_path)
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | run_id=%(run_id)s | %(message)s"
-    )
+        # Step 2: Trigger action (important!)
+        record_count = df.count()
 
-    if not logger.handlers:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        print("✅ SUCCESS")
+        print(f"Total records read: {record_count}")
 
-    return logging.LoggerAdapter(logger, {"run_id": run_id})
+        # Step 3: Show sample records
+        df.show(5, truncate=False)
+
+    except Exception as e:
+        print("❌ FAILED TO READ FILES")
+        print(str(e))
+        sys.exit(1)
+
+    spark.stop()
+
+if __name__ == "__main__":
+    main()
 
