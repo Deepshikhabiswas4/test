@@ -1,40 +1,43 @@
-
 from pyspark.sql import SparkSession
-import sys
 
-def main():
+# 1️⃣ Start fresh Spark session
+spark = (
+    SparkSession.builder
+    .appName("csv-write-test")
+    .getOrCreate()
+)
 
-    spark = SparkSession.builder \
-        .appName("HDFS_Read_Verification") \
-        .getOrCreate()
+# 2️⃣ Create a tiny DataFrame
+data = [
+    (1, "Alice", 100.50),
+    (2, "Bob", 200.75),
+    (3, "Charlie", 300.00)
+]
 
-    # Path will be given by your mentor
-    input_path = sys.argv[1]
+columns = ["id", "name", "amount"]
 
-    print(f"Trying to read files from path: {input_path}")
+df = spark.createDataFrame(data, columns)
 
-    try:
-        # Step 1: Read files from HDFS
-        df = spark.read \
-            .option("header", "true") \
-            .option("inferSchema", "true") \
-            .csv(input_path)
+# 3️⃣ Print DF (driver side)
+df.show(truncate=False)
 
-        # Step 2: Trigger action (important!)
-        record_count = df.count()
+# 4️⃣ CSV write path (KEEP IT SIMPLE)
+test_path = "hdfs://10.177.103.199:8022/data-lake/Fincore/spark_cluster/csv_test_simple"
 
-        print("✅ SUCCESS")
-        print(f"Total records read: {record_count}")
+print("WRITING CSV TO =>", test_path)
 
-        # Step 3: Show sample records
-        df.show(5, truncate=False)
+# 5️⃣ Write CSV
+(
+    df
+    .coalesce(1)        # one CSV file for easy checking
+    .write
+    .format("csv")
+    .option("header", "true")
+    .mode("overwrite")
+    .save(test_path)
+)
 
-    except Exception as e:
-        print("❌ FAILED TO READ FILES")
-        print(str(e))
-        sys.exit(1)
+print("CSV WRITE SUCCESS")
 
-    spark.stop()
-
-if __name__ == "__main__":
-    main()
+# 6️⃣ Stop Spark
+spark.stop()
