@@ -1,46 +1,186 @@
-const zoneDebounceRef = useRef(null);
+import { useEffect, useState } from "react";
+import {
+  Box,
+  Card,
+  Stack,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  TextField,
+} from "@mui/material";
+import Autocomplete from "@mui/material/Autocomplete";
+import useApi from "../../hooks/useApi";
 
-useEffect(() => {
-  zoneDebounceRef.current = debounce(async (val) => {
-    if (!val || val.length < 2) {
-      setZoneList([]);
-      return;
+export default function BranchWiseReports() {
+  const { callApi } = useApi();
+
+  /* ---------------- RADIO ---------------- */
+  const [countryType, setCountryType] = useState("INDIAN");
+
+  /* ---------------- MASTER STATES ---------------- */
+  const [zoneList, setZoneList] = useState([]);
+  const [circleList, setCircleList] = useState([]);
+  const [branchList, setBranchList] = useState([]);
+
+  /* ---------------- SELECTED VALUES ---------------- */
+  const [zone, setZone] = useState(null);
+  const [circle, setCircle] = useState(null);
+  const [branch, setBranch] = useState(null);
+
+  /* ---------------- LOAD ZONES (ON LOAD) ---------------- */
+  useEffect(() => {
+    fetchZones();
+  }, []);
+
+  /* ---------------- HANDLE RADIO CHANGE ---------------- */
+  const handleCountryChange = (e) => {
+    const value = e.target.value;
+    setCountryType(value);
+
+    // Reset everything
+    setZone(null);
+    setCircle(null);
+    setBranch(null);
+    setCircleList([]);
+    setBranchList([]);
+
+    if (value === "FOREIGN") {
+      // Auto select zone id = 4
+      const foreignZone = { id: 4, description: "FOREIGN ZONE" };
+      setZone(foreignZone);
+
+      // Load circles for zone 4
+      fetchCircles(4);
     }
+  };
 
-    setLoadingZone(true);
+  /* ---------------- API CALLS ---------------- */
 
+  // ZONES
+  const fetchZones = async () => {
     const res = await callApi(
-      `/CM/common-master/zones?q=${encodeURIComponent(val)}`,
+      "/CM/common-master/zone-codes",
       null,
       "GET"
     );
 
-    console.log("ZONE API RESPONSE:", res?.data);
+    setZoneList(res?.data || []);
+  };
 
-    let data = res?.data || [];
+  // CIRCLES (by zoneId)
+  const fetchCircles = async (zoneId) => {
+    if (!zoneId) return;
 
-    data =
-      countryType === "FOREIGN"
-        ? data.filter(z => z.code === "4")
-        : data.filter(z => z.code !== "4");
+    const res = await callApi(
+      `/CM/common-master/circle-codes?zoneId=${zoneId}`,
+      null,
+      "GET"
+    );
 
-    setZoneList(data);
-    setLoadingZone(false);
-  }, 400);
+    setCircleList(res?.data || []);
+  };
 
-  return () => zoneDebounceRef.current?.cancel();
-}, [countryType]);
+  // BRANCHES (by circleId)
+  const fetchBranches = async (circleId) => {
+    if (!circleId) return;
 
+    const res = await callApi(
+      `/CM/common-master/branch-codes?circleId=${circleId}`,
+      null,
+      "GET"
+    );
 
+    setBranchList(res?.data || []);
+  };
 
-<Autocomplete
-  value={zone}
-  options={zoneList}
-  loading={loadingZone}
-  onInputChange={(e, v) => zoneDebounceRef.current(v)}
-  onChange={(e, v) => setZone(v)}
-  getOptionLabel={(o) => o?.name || ""}
-  renderInput={(params) => (
-    <TextField {...params} label="Zone" />
-  )}
-/>
+  /* ---------------- UI ---------------- */
+
+  return (
+    <Box
+      minHeight="80vh"
+      display="flex"
+      justifyContent="center"
+      alignItems="center"
+    >
+      <Card sx={{ p: 4, width: 520 }}>
+        <Stack spacing={3}>
+          {/* RADIO BUTTONS */}
+          <RadioGroup
+            row
+            value={countryType}
+            onChange={handleCountryChange}
+          >
+            <FormControlLabel
+              value="INDIAN"
+              control={<Radio />}
+              label="Indian"
+            />
+            <FormControlLabel
+              value="FOREIGN"
+              control={<Radio />}
+              label="Foreign"
+            />
+          </RadioGroup>
+
+          {/* ZONE (ONLY FOR INDIAN) */}
+          {countryType === "INDIAN" && (
+            <Autocomplete
+              value={zone}
+              options={zoneList.filter((z) => z.id !== 4)}
+              isOptionEqualToValue={(o, v) => o.id === v.id}
+              getOptionLabel={(o) => o?.description || ""}
+              onChange={(e, v) => {
+                setZone(v);
+                setCircle(null);
+                setBranch(null);
+                setCircleList([]);
+                setBranchList([]);
+
+                if (v) {
+                  fetchCircles(v.id);
+                }
+              }}
+              renderInput={(params) => (
+                <TextField {...params} label="Zone" />
+              )}
+            />
+          )}
+
+          {/* CIRCLE */}
+          <Autocomplete
+            value={circle}
+            options={circleList}
+            disabled={!zone}
+            isOptionEqualToValue={(o, v) => o.id === v.id}
+            getOptionLabel={(o) => o?.description || ""}
+            onChange={(e, v) => {
+              setCircle(v);
+              setBranch(null);
+              setBranchList([]);
+
+              if (v) {
+                fetchBranches(v.id);
+              }
+            }}
+            renderInput={(params) => (
+              <TextField {...params} label="Circle" />
+            )}
+          />
+
+          {/* BRANCH */}
+          <Autocomplete
+            value={branch}
+            options={branchList}
+            disabled={!circle}
+            isOptionEqualToValue={(o, v) => o.id === v.id}
+            getOptionLabel={(o) => o?.description || ""}
+            onChange={(e, v) => setBranch(v)}
+            renderInput={(params) => (
+              <TextField {...params} label="Branch" />
+            )}
+          />
+        </Stack>
+      </Card>
+    </Box>
+  );
+}
