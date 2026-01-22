@@ -1,59 +1,216 @@
-run_date = today.strftime("%Y-%m-%d")
+import { useState, useEffect } from "react";
+import {
+  Box,
+  Tabs,
+  Tab,
+  RadioGroup,
+  FormControlLabel,
+  Radio,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Button,
+  Stack,
+} from "@mui/material";
+import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
 
-base_path = "hdfs://10.177.103.199:8022/data-lake/fincore/spark_cluster/csvcheck1"
-output_path = f"{base_path}/run_date={run_date}/{run_id}"
 
-hadoop_conf = spark._jsc.hadoopConfiguration()
-fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
-Path = spark._jvm.org.apache.hadoop.fs.Path
 
-output_dir = Path(output_path)
-if not fs.exists(output_dir):
-    fs.mkdirs(output_dir)
+export default function ReportsScreen() {
+  const [tab, setTab] = useState(0);
 
-# ---------------- KAFKA IDPOTENCY MARKER ----------------
-kafka_marker = Path(output_path + "/_KAFKA_TRIGGERED")
+  const [countryType, setCountryType] = useState("INDIAN");
 
-if fs.exists(kafka_marker):
-    logger.info("Kafka already triggered for this run_id. Skipping Kafka trigger.")
-else:
-    try:
-        producer = Producer({"bootstrap.servers": kafkalistener})
-        producer.produce("pipeline-events", "Difference")
-        producer.flush()
-        logger.info("Kafka trigger sent successfully")
+  const [zones, setZones] = useState([]);
+  const [circles, setCircles] = useState([]);
+  const [branches, setBranches] = useState([]);
+  const [reports, setReports] = useState([]);
 
-        # Create marker file so Kafka doesn't trigger again on rerun
-        out_stream = fs.create(kafka_marker)
-        out_stream.write(bytearray("triggered", "utf-8"))
-        out_stream.close()
+  const [zone, setZone] = useState("");
+  const [circle, setCircle] = useState("");
+  const [branch, setBranch] = useState("");
+  const [report, setReport] = useState("");
+  const [date, setDate] = useState(null);
 
-        logger.info("Kafka marker file created successfully")
+  /* ---------------- FETCH MASTER DATA ---------------- */
 
-    except Exception as e:
-        logger.error(f"Kafka trigger failed: {e}")
-        raise e   # stop job if kafka trigger itself fails
+  useEffect(() => {
+    fetchZones();
+    fetchReports();
+  }, []);
 
-# ---------------- WRITE CSV (RETRY SAFE) ----------------
-final_df.coalesce(1) \
-    .write \
-    .format("csv") \
-    .option("delimiter", "|") \
-    .option("header", "true") \
-    .mode("overwrite") \
-    .save(output_path)
+  useEffect(() => {
+    if (zone) {
+      fetchCircles(zone);
+      setCircle("");
+      setBranch("");
+    }
+  }, [zone]);
 
-# ---------------- RENAME PART FILE ----------------
-for file_status in fs.listStatus(output_dir):
-    filename = file_status.getPath().getName()
+  useEffect(() => {
+    if (circle) {
+      fetchBranches(circle);
+      setBranch("");
+    }
+  }, [circle]);
 
-    if filename.startswith("part-") and filename.endswith(".csv"):
-        src_path = file_status.getPath()
-        dest_path = Path(output_path + "/difference.csv")
+  /* ---------------- API MOCKS ---------------- */
 
-        if fs.exists(dest_path):
-            fs.delete(dest_path, True)
+  const fetchZones = async () => {
+    const data = [
+      { code: "1", name: "Zone 1" },
+      { code: "2", name: "Zone 2" },
+      { code: "3", name: "Zone 3" },
+      { code: "4", name: "Zone 4 (Foreign)" },
+    ];
+    setZones(data);
+  };
 
-        fs.rename(src_path, dest_path)
-        logger.info(f"Renamed {filename} -> difference.csv")
-        break
+  const fetchCircles = async (zoneCode) => {
+    setCircles([
+      { code: "C1", name: "Circle 1" },
+      { code: "C2", name: "Circle 2" },
+    ]);
+  };
+
+  const fetchBranches = async (circleCode) => {
+    setBranches([
+      { code: "B1", name: "Branch 1" },
+      { code: "B2", name: "Branch 2" },
+    ]);
+  };
+
+  const fetchReports = async () => {
+    setReports([
+      { id: 1, name: "GL Report" },
+      { id: 2, name: "Balance Report" },
+    ]);
+  };
+
+  /* ---------------- FILTER ZONES ---------------- */
+
+  const filteredZones =
+    countryType === "FOREIGN"
+      ? zones.filter((z) => z.code === "4")
+      : zones.filter((z) => z.code !== "4");
+
+  /* ---------------- DOWNLOAD ---------------- */
+
+  const handleDownload = () => {
+    console.log({
+      countryType,
+      zone,
+      circle,
+      branch,
+      report,
+      date: date?.format("YYYY-MM-DD"),
+    });
+  };
+
+  return (
+    <Box>
+      {/* ---------------- TABS ---------------- */}
+      <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+        <Tab label="Whole Banks" />
+        <Tab label="Branch-wise Reports" />
+      </Tabs>
+
+      {/* ---------------- TAB 1 ---------------- */}
+      {tab === 0 && <Box p={3}>Whole Bank Reports Screen</Box>}
+
+      {/* ---------------- TAB 2 ---------------- */}
+      {tab === 1 && (
+        <Box p={3}>
+          {/* RADIO */}
+          <RadioGroup
+            row
+            value={countryType}
+            onChange={(e) => {
+              setCountryType(e.target.value);
+              setZone("");
+              setCircle("");
+              setBranch("");
+            }}
+          >
+            <FormControlLabel value="INDIAN" control={<Radio />} label="Indian" />
+            <FormControlLabel value="FOREIGN" control={<Radio />} label="Foreign" />
+          </RadioGroup>
+
+          <Stack spacing={2} mt={2}>
+            {/* ZONE */}
+            {countryType === "INDIAN" && (
+              <FormControl fullWidth>
+                <InputLabel>Zone</InputLabel>
+                <Select value={zone} onChange={(e) => setZone(e.target.value)}>
+                  {filteredZones.map((z) => (
+                    <MenuItem key={z.code} value={z.code}>
+                      {z.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+
+            {/* CIRCLE */}
+            <FormControl fullWidth disabled={!zone && countryType === "INDIAN"}>
+              <InputLabel>Circle</InputLabel>
+              <Select value={circle} onChange={(e) => setCircle(e.target.value)}>
+                {circles.map((c) => (
+                  <MenuItem key={c.code} value={c.code}>
+                    {c.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* BRANCH */}
+            <FormControl fullWidth disabled={!circle}>
+              <InputLabel>Branch</InputLabel>
+              <Select value={branch} onChange={(e) => setBranch(e.target.value)}>
+                {branches.map((b) => (
+                  <MenuItem key={b.code} value={b.code}>
+                    {b.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* REPORT */}
+            <FormControl fullWidth>
+              <InputLabel>Report</InputLabel>
+              <Select value={report} onChange={(e) => setReport(e.target.value)}>
+                {reports.map((r) => (
+                  <MenuItem key={r.id} value={r.id}>
+                    {r.name}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+
+            {/* DATE */}
+            <LocalizationProvider dateAdapter={AdapterDayjs}>
+              <DatePicker
+                label="Report Date"
+                value={date}
+                onChange={(v) => setDate(v)}
+                maxDate={dayjs()}
+              />
+            </LocalizationProvider>
+
+            {/* DOWNLOAD */}
+            <Button
+              variant="contained"
+              onClick={handleDownload}
+              disabled={!report || !date}
+            >
+              Fetch & Download
+            </Button>
+          </Stack>
+        </Box>
+      )}
+    </Box>
+  );
+}
