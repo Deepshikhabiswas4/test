@@ -7,8 +7,12 @@ import {
   FormControlLabel,
   Radio,
   TextField,
+  Button,
 } from "@mui/material";
 import Autocomplete from "@mui/material/Autocomplete";
+import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
+import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
+import dayjs from "dayjs";
 import useApi from "../../hooks/useApi";
 
 export default function BranchWiseReports() {
@@ -17,27 +21,30 @@ export default function BranchWiseReports() {
   /* ---------------- RADIO ---------------- */
   const [countryType, setCountryType] = useState("INDIAN");
 
-  /* ---------------- MASTER STATES ---------------- */
+  /* ---------------- MASTER DATA ---------------- */
   const [zoneList, setZoneList] = useState([]);
   const [circleList, setCircleList] = useState([]);
   const [branchList, setBranchList] = useState([]);
+  const [reportList, setReportList] = useState([]);
 
   /* ---------------- SELECTED VALUES ---------------- */
   const [zone, setZone] = useState(null);
   const [circle, setCircle] = useState(null);
   const [branch, setBranch] = useState(null);
+  const [report, setReport] = useState(null);
+  const [reportDate, setReportDate] = useState(null);
 
-  /* ---------------- LOAD ZONES (ON LOAD) ---------------- */
+  /* ---------------- INITIAL LOAD ---------------- */
   useEffect(() => {
     fetchZones();
+    fetchReports();
   }, []);
 
-  /* ---------------- HANDLE RADIO CHANGE ---------------- */
+  /* ---------------- RADIO CHANGE ---------------- */
   const handleCountryChange = (e) => {
     const value = e.target.value;
     setCountryType(value);
 
-    // Reset everything
     setZone(null);
     setCircle(null);
     setBranch(null);
@@ -45,52 +52,76 @@ export default function BranchWiseReports() {
     setBranchList([]);
 
     if (value === "FOREIGN") {
-      // Auto select zone id = 4
       const foreignZone = { id: 4, description: "FOREIGN ZONE" };
       setZone(foreignZone);
-
-      // Load circles for zone 4
       fetchCircles(4);
     }
   };
 
   /* ---------------- API CALLS ---------------- */
 
-  // ZONES
+  // Zones
   const fetchZones = async () => {
     const res = await callApi(
       "/CM/common-master/zone-codes",
-      null,
-      "GET"
+      {},
+      "POST"
     );
-
     setZoneList(res?.data || []);
   };
 
-  // CIRCLES (by zoneId)
+  // Circles (by zoneId)
   const fetchCircles = async (zoneId) => {
     if (!zoneId) return;
 
     const res = await callApi(
-      `/CM/common-master/circle-codes?zoneId=${zoneId}`,
-      null,
-      "GET"
+      "/CM/common-master/circle-codes",
+      { zoneId },
+      "POST"
     );
-
     setCircleList(res?.data || []);
   };
 
-  // BRANCHES (by circleId)
-  const fetchBranches = async (circleId) => {
-    if (!circleId) return;
+  // Branches (by circleCode)
+  const fetchBranches = async (circleCode) => {
+    if (!circleCode) return;
 
     const res = await callApi(
-      `/CM/common-master/branch-codes?circleId=${circleId}`,
-      null,
-      "GET"
+      "/CM/common-master/branch-codes",
+      { circleCode },
+      "POST"
     );
-
     setBranchList(res?.data || []);
+  };
+
+  // Reports
+  const fetchReports = async () => {
+    const res = await callApi(
+      "/RS/reports/types",
+      {},
+      "POST"
+    );
+    setReportList(res?.data || []);
+  };
+
+  /* ---------------- DOWNLOAD ---------------- */
+  const handleDownload = async () => {
+    const payload = {
+      countryType,
+      zoneId: zone?.id,
+      circleCode: circle?.circleCode,
+      branchCode: branch?.branchCode,
+      reportId: report?.id,
+      reportDate: reportDate?.format("YYYY-MM-DD"),
+    };
+
+    console.log("DOWNLOAD PAYLOAD:", payload);
+
+    await callApi(
+      "/RS/reports/download",
+      payload,
+      "POST"
+    );
   };
 
   /* ---------------- UI ---------------- */
@@ -102,31 +133,19 @@ export default function BranchWiseReports() {
       justifyContent="center"
       alignItems="center"
     >
-      <Card sx={{ p: 4, width: 520 }}>
+      <Card sx={{ p: 4, width: 580 }}>
         <Stack spacing={3}>
-          {/* RADIO BUTTONS */}
-          <RadioGroup
-            row
-            value={countryType}
-            onChange={handleCountryChange}
-          >
-            <FormControlLabel
-              value="INDIAN"
-              control={<Radio />}
-              label="Indian"
-            />
-            <FormControlLabel
-              value="FOREIGN"
-              control={<Radio />}
-              label="Foreign"
-            />
+          {/* RADIO */}
+          <RadioGroup row value={countryType} onChange={handleCountryChange}>
+            <FormControlLabel value="INDIAN" control={<Radio />} label="Indian" />
+            <FormControlLabel value="FOREIGN" control={<Radio />} label="Foreign" />
           </RadioGroup>
 
-          {/* ZONE (ONLY FOR INDIAN) */}
+          {/* ZONE (INDIAN ONLY) */}
           {countryType === "INDIAN" && (
             <Autocomplete
               value={zone}
-              options={zoneList.filter((z) => z.id !== 4)}
+              options={zoneList.filter(z => z.id !== 4)}
               isOptionEqualToValue={(o, v) => o.id === v.id}
               getOptionLabel={(o) => o?.description || ""}
               onChange={(e, v) => {
@@ -135,10 +154,7 @@ export default function BranchWiseReports() {
                 setBranch(null);
                 setCircleList([]);
                 setBranchList([]);
-
-                if (v) {
-                  fetchCircles(v.id);
-                }
+                if (v) fetchCircles(v.id);
               }}
               renderInput={(params) => (
                 <TextField {...params} label="Zone" />
@@ -151,16 +167,17 @@ export default function BranchWiseReports() {
             value={circle}
             options={circleList}
             disabled={!zone}
-            isOptionEqualToValue={(o, v) => o.id === v.id}
-            getOptionLabel={(o) => o?.description || ""}
+            isOptionEqualToValue={(o, v) =>
+              o.circleCode === v.circleCode
+            }
+            getOptionLabel={(o) =>
+              o ? `${o.circleCode} - ${o.circleName}` : ""
+            }
             onChange={(e, v) => {
               setCircle(v);
               setBranch(null);
               setBranchList([]);
-
-              if (v) {
-                fetchBranches(v.id);
-              }
+              if (v) fetchBranches(v.circleCode);
             }}
             renderInput={(params) => (
               <TextField {...params} label="Circle" />
@@ -172,13 +189,51 @@ export default function BranchWiseReports() {
             value={branch}
             options={branchList}
             disabled={!circle}
-            isOptionEqualToValue={(o, v) => o.id === v.id}
-            getOptionLabel={(o) => o?.description || ""}
+            isOptionEqualToValue={(o, v) =>
+              o.branchCode === v.branchCode
+            }
+            getOptionLabel={(o) =>
+              o ? `${o.branchCode} - ${o.branchName}` : ""
+            }
             onChange={(e, v) => setBranch(v)}
             renderInput={(params) => (
               <TextField {...params} label="Branch" />
             )}
           />
+
+          {/* REPORT NAME */}
+          <Autocomplete
+            value={report}
+            options={reportList}
+            isOptionEqualToValue={(o, v) => o.id === v.id}
+            getOptionLabel={(o) => o?.reportName || ""}
+            onChange={(e, v) => setReport(v)}
+            renderInput={(params) => (
+              <TextField {...params} label="Report Name" />
+            )}
+          />
+
+          {/* REPORT DATE */}
+          <LocalizationProvider dateAdapter={AdapterDayjs}>
+            <DatePicker
+              label="Report Date"
+              value={reportDate}
+              maxDate={dayjs()}
+              onChange={(v) => setReportDate(v)}
+            />
+          </LocalizationProvider>
+
+          {/* DOWNLOAD */}
+          <Button
+            variant="contained"
+            size="large"
+            disabled={
+              !circle || !branch || !report || !reportDate
+            }
+            onClick={handleDownload}
+          >
+            Fetch & Download
+          </Button>
         </Stack>
       </Card>
     </Box>
