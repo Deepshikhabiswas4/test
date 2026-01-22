@@ -1,216 +1,205 @@
-import { useState, useEffect } from "react";
+import { useState, useCallback } from "react";
 import {
   Box,
-  Tabs,
-  Tab,
+  Card,
+  Stack,
   RadioGroup,
   FormControlLabel,
   Radio,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
+  TextField,
   Button,
-  Stack,
 } from "@mui/material";
+import Autocomplete from "@mui/material/Autocomplete";
 import { LocalizationProvider, DatePicker } from "@mui/x-date-pickers";
 import { AdapterDayjs } from "@mui/x-date-pickers/AdapterDayjs";
 import dayjs from "dayjs";
-
-
-
-export default function ReportsScreen() {
-  const [tab, setTab] = useState(0);
+import debounce from "lodash/debounce";
+import useApi from "../../hooks/useApi";
+export default function BranchWiseReports() {
+  const { callApi } = useApi();
 
   const [countryType, setCountryType] = useState("INDIAN");
 
-  const [zones, setZones] = useState([]);
-  const [circles, setCircles] = useState([]);
-  const [branches, setBranches] = useState([]);
-  const [reports, setReports] = useState([]);
+  const [zoneList, setZoneList] = useState([]);
+  const [circleList, setCircleList] = useState([]);
+  const [branchList, setBranchList] = useState([]);
 
-  const [zone, setZone] = useState("");
-  const [circle, setCircle] = useState("");
-  const [branch, setBranch] = useState("");
-  const [report, setReport] = useState("");
+  const [zone, setZone] = useState(null);
+  const [circle, setCircle] = useState(null);
+  const [branch, setBranch] = useState(null);
   const [date, setDate] = useState(null);
 
-  /* ---------------- FETCH MASTER DATA ---------------- */
+  const [loadingZone, setLoadingZone] = useState(false);
+  const [loadingCircle, setLoadingCircle] = useState(false);
+  const [loadingBranch, setLoadingBranch] = useState(false);
 
-  useEffect(() => {
-    fetchZones();
-    fetchReports();
-  }, []);
+  /* ---------------- ZONE SEARCH ---------------- */
 
-  useEffect(() => {
-    if (zone) {
-      fetchCircles(zone);
-      setCircle("");
-      setBranch("");
-    }
-  }, [zone]);
+  const searchZones = useCallback(
+    debounce(async (val) => {
+      if (!val || val.length < 2) {
+        setZoneList([]);
+        return;
+      }
 
-  useEffect(() => {
-    if (circle) {
-      fetchBranches(circle);
-      setBranch("");
-    }
-  }, [circle]);
+      setLoadingZone(true);
+      const res = await callApi(
+        `/CM/common-master/zones?q=${encodeURIComponent(val)}`,
+        null,
+        "GET"
+      );
 
-  /* ---------------- API MOCKS ---------------- */
+      const data = res?.data || [];
 
-  const fetchZones = async () => {
-    const data = [
-      { code: "1", name: "Zone 1" },
-      { code: "2", name: "Zone 2" },
-      { code: "3", name: "Zone 3" },
-      { code: "4", name: "Zone 4 (Foreign)" },
-    ];
-    setZones(data);
-  };
+      const filtered =
+        countryType === "FOREIGN"
+          ? data.filter((z) => z.zoneCode === "4")
+          : data.filter((z) => z.zoneCode !== "4");
+
+      setZoneList(filtered);
+      setLoadingZone(false);
+    }, 400),
+    [countryType]
+  );
+
+  /* ---------------- CIRCLE FETCH ---------------- */
 
   const fetchCircles = async (zoneCode) => {
-    setCircles([
-      { code: "C1", name: "Circle 1" },
-      { code: "C2", name: "Circle 2" },
-    ]);
+    setLoadingCircle(true);
+    const res = await callApi(
+      `/CM/common-master/circles?zoneCode=${zoneCode}`,
+      null,
+      "GET"
+    );
+    setCircleList(res?.data || []);
+    setLoadingCircle(false);
   };
 
-  const fetchBranches = async (circleCode) => {
-    setBranches([
-      { code: "B1", name: "Branch 1" },
-      { code: "B2", name: "Branch 2" },
-    ]);
-  };
+  /* ---------------- BRANCH SEARCH ---------------- */
 
-  const fetchReports = async () => {
-    setReports([
-      { id: 1, name: "GL Report" },
-      { id: 2, name: "Balance Report" },
-    ]);
-  };
+  const searchBranches = useCallback(
+    debounce(async (val) => {
+      if (!val || val.length < 3 || !circle) {
+        setBranchList([]);
+        return;
+      }
 
-  /* ---------------- FILTER ZONES ---------------- */
-
-  const filteredZones =
-    countryType === "FOREIGN"
-      ? zones.filter((z) => z.code === "4")
-      : zones.filter((z) => z.code !== "4");
+      setLoadingBranch(true);
+      const res = await callApi(
+        `/CM/common-master/branches-code-name-only?q=${encodeURIComponent(val)}`,
+        null,
+        "GET"
+      );
+      setBranchList(res?.data || []);
+      setLoadingBranch(false);
+    }, 400),
+    [circle]
+  );
 
   /* ---------------- DOWNLOAD ---------------- */
 
   const handleDownload = () => {
     console.log({
       countryType,
-      zone,
-      circle,
-      branch,
-      report,
-      date: date?.format("YYYY-MM-DD"),
+      zoneCode: zone?.zoneCode,
+      circleCode: circle?.circleCode,
+      branchCode: branch?.branchCode,
+      reportDate: date?.format("YYYY-MM-DD"),
     });
   };
 
   return (
-    <Box>
-      {/* ---------------- TABS ---------------- */}
-      <Tabs value={tab} onChange={(_, v) => setTab(v)}>
-        <Tab label="Whole Banks" />
-        <Tab label="Branch-wise Reports" />
-      </Tabs>
-
-      {/* ---------------- TAB 1 ---------------- */}
-      {tab === 0 && <Box p={3}>Whole Bank Reports Screen</Box>}
-
-      {/* ---------------- TAB 2 ---------------- */}
-      {tab === 1 && (
-        <Box p={3}>
+    <Box
+      display="flex"
+      justifyContent="center"
+      alignItems="center"
+      minHeight="80vh"
+    >
+      <Card sx={{ p: 4, width: 520 }}>
+        <Stack spacing={3}>
           {/* RADIO */}
           <RadioGroup
             row
             value={countryType}
             onChange={(e) => {
               setCountryType(e.target.value);
-              setZone("");
-              setCircle("");
-              setBranch("");
+              setZone(null);
+              setCircle(null);
+              setBranch(null);
             }}
           >
             <FormControlLabel value="INDIAN" control={<Radio />} label="Indian" />
             <FormControlLabel value="FOREIGN" control={<Radio />} label="Foreign" />
           </RadioGroup>
 
-          <Stack spacing={2} mt={2}>
-            {/* ZONE */}
-            {countryType === "INDIAN" && (
-              <FormControl fullWidth>
-                <InputLabel>Zone</InputLabel>
-                <Select value={zone} onChange={(e) => setZone(e.target.value)}>
-                  {filteredZones.map((z) => (
-                    <MenuItem key={z.code} value={z.code}>
-                      {z.name}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
+          {/* ZONE */}
+          {countryType === "INDIAN" && (
+            <Autocomplete
+              options={zoneList}
+              loading={loadingZone}
+              getOptionLabel={(o) => `${o.zoneCode} - ${o.zoneName}`}
+              onInputChange={(e, v) => searchZones(v)}
+              onChange={(e, v) => {
+                setZone(v);
+                setCircle(null);
+                setBranch(null);
+                v && fetchCircles(v.zoneCode);
+              }}
+              renderInput={(params) => (
+                <TextField {...params} label="Zone" />
+              )}
+            />
+          )}
+
+          {/* CIRCLE */}
+          <Autocomplete
+            options={circleList}
+            disabled={countryType === "INDIAN" && !zone}
+            getOptionLabel={(o) => `${o.circleCode} - ${o.circleName}`}
+            loading={loadingCircle}
+            onChange={(e, v) => {
+              setCircle(v);
+              setBranch(null);
+            }}
+            renderInput={(params) => (
+              <TextField {...params} label="Circle" />
             )}
+          />
 
-            {/* CIRCLE */}
-            <FormControl fullWidth disabled={!zone && countryType === "INDIAN"}>
-              <InputLabel>Circle</InputLabel>
-              <Select value={circle} onChange={(e) => setCircle(e.target.value)}>
-                {circles.map((c) => (
-                  <MenuItem key={c.code} value={c.code}>
-                    {c.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+          {/* BRANCH */}
+          <Autocomplete
+            options={branchList}
+            disabled={!circle}
+            loading={loadingBranch}
+            getOptionLabel={(o) => `${o.branchCode} - ${o.branchName}`}
+            onInputChange={(e, v) => searchBranches(v)}
+            onChange={(e, v) => setBranch(v)}
+            renderInput={(params) => (
+              <TextField {...params} label="Branch" />
+            )}
+          />
 
-            {/* BRANCH */}
-            <FormControl fullWidth disabled={!circle}>
-              <InputLabel>Branch</InputLabel>
-              <Select value={branch} onChange={(e) => setBranch(e.target.value)}>
-                {branches.map((b) => (
-                  <MenuItem key={b.code} value={b.code}>
-                    {b.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+          {/* DATE */}
+          <LocalizationProvider dateAdapter={AdapterDayjs}>
+            <DatePicker
+              label="Report Date"
+              value={date}
+              maxDate={dayjs()}
+              onChange={(v) => setDate(v)}
+            />
+          </LocalizationProvider>
 
-            {/* REPORT */}
-            <FormControl fullWidth>
-              <InputLabel>Report</InputLabel>
-              <Select value={report} onChange={(e) => setReport(e.target.value)}>
-                {reports.map((r) => (
-                  <MenuItem key={r.id} value={r.id}>
-                    {r.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-
-            {/* DATE */}
-            <LocalizationProvider dateAdapter={AdapterDayjs}>
-              <DatePicker
-                label="Report Date"
-                value={date}
-                onChange={(v) => setDate(v)}
-                maxDate={dayjs()}
-              />
-            </LocalizationProvider>
-
-            {/* DOWNLOAD */}
-            <Button
-              variant="contained"
-              onClick={handleDownload}
-              disabled={!report || !date}
-            >
-              Fetch & Download
-            </Button>
-          </Stack>
-        </Box>
-      )}
+          {/* DOWNLOAD */}
+          <Button
+            variant="contained"
+            size="large"
+            disabled={!circle || !branch || !date}
+            onClick={handleDownload}
+          >
+            Fetch & Download
+          </Button>
+        </Stack>
+      </Card>
     </Box>
   );
 }
