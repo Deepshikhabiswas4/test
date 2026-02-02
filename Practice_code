@@ -1,49 +1,20 @@
-import datetime 
-from pyspark.sql import SparkSession , functions as F
-import pyspark.sql.types as T
-from pyspark.sql.functions import to_date,expr, col,when, length, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType
-from datetime import date, timedelta
-from pyspark.sql.functions import desc
-import sys
-from py4j.java_gateway import java_import
-import concurrent.futures
-import builtins
-from pyspark.sql import Row
-import re
-# =========== Common Methods =============================
-from common.logger import setup_logger 
-from common.properties import get_oracle_properties
-from common.dateUtil import get_etl_date
-from common.fileUtil import files_to_read
-from common.fileUtil import paths_for_read
-from common.fileUtil import tables_to_read
-from common.processRun import get_run_id
-from common.pattern import read_patterns
-from common.createSpark import create_spark_session
-from common.fileUtil import get_hdfs_base
-from common.check_monthend import check_MonthEnd
-
 HDFS_BASE = get_hdfs_base()
 spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
-
 today = get_etl_date(spark)
+tommorrow_date = today + timedelta(days=1)
+# etl_plus_1_str = etl_plus_1.strftime("%Y-%m-%d")
 yesterday = today - timedelta(days=1)
-etl_plus_1 = today + timedelta(days=1)
-
 posting_date_str = today.strftime("%Y-%m-%d")
-RUN_ID = get_run_id(spark,etl_plus_1)   
+today_str = posting_date_str
 yesterday=yesterday.strftime("%Y-%m-%d")
 today= today.strftime("%Y-%m-%d")
-etl_plus_1= etl_plus_1.strftime("%Y-%m-%d")
-
+RUN_ID = get_run_id( spark,posting_date_str,"GLIF") 
 logger = setup_logger("GLIF", RUN_ID , posting_date_str)
-
+today1 = date.today()   
 logger.info(f"=== Using current date for POST_DATE: {posting_date_str} ===")
-logger.info("RUN_ID as : {RUN_ID}")
+logger.info(f"RUN_ID as : {RUN_ID}")
 
 logger.info("Fetched oracle properties SUCCESFULLY :)")
-
 oracle_properties=get_oracle_properties()
 logger.info(oracle_properties)
 
@@ -52,92 +23,10 @@ oracle_user = oracle_properties["user"]
 oracle_password = oracle_properties["password"]
 oracle_driver = oracle_properties["driver"]
 DriverManager = spark._jvm.java.sql.DriverManager
+startTime= datetime.now()
+ 
 
-def ppf_postings(df,source_cgl="2115505002",transfer_cgl="1106505001",other_branch="09595"):
-    base_df = (
-        df
-        .filter(
-            (F.col("CGL") == source_cgl) &
-            (F.col("BRANCH_CODE") != other_branch) &
-            ((F.col("DEBIT_AMOUNT") != 0) | (F.col("CREDIT_AMOUNT") != 0))& ((F.col("DEBIT_AMOUNT") + F.col("CREDIT_AMOUNT")) != 0)
-        )
-        .select(
-            "BATCH_ID",
-            "JOURNAL_ID",
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL",
-            "NARRATION",
-            "TRANSACTION_COUNT",
-            "SOURCE_FLAG",            
-            (F.col("DEBIT_AMOUNT") + F.col("CREDIT_AMOUNT")).alias("NET")
-        )
-    )
-    generated_df = base_df.select(
-   F.explode(F.array(
-       F.struct(
-           F.col("BATCH_ID"),
-           F.col("JOURNAL_ID"),
-           F.lit("PPF TFR TO GAD").alias("NARRATION"),
-           F.lit(1).alias("TRANSACTION_COUNT"),
-           F.col("SOURCE_FLAG"),
-           F.col("BRANCH_CODE"),
-           F.col("CURRENCY"),
-           F.col("CGL"),
-           (-F.least(F.col("NET"), F.lit(0))).alias("DEBIT_AMOUNT"),  # if NET<=0
-           (-F.greatest(F.col("NET"), F.lit(0))).alias("CREDIT_AMOUNT")  # if NET>0
-       ),
-       F.struct(
-           F.col("BATCH_ID"),
-           F.col("JOURNAL_ID"),
-           F.lit("PPF TFR TO GAD").alias("NARRATION"),
-           F.lit(1).alias("TRANSACTION_COUNT"),
-           F.col("SOURCE_FLAG"),
-           F.col("BRANCH_CODE"),
-           F.col("CURRENCY"),
-           F.lit(transfer_cgl).alias("CGL"),
-           F.greatest(F.col("NET"), F.lit(0)).alias("DEBIT_AMOUNT"),  # if NET>0
-           F.least(F.col("NET"), F.lit(0)).alias("CREDIT_AMOUNT")    # if NET<=0
-       ),
-       F.struct(
-           F.col("BATCH_ID"),
-           F.col("JOURNAL_ID"),
-           F.lit("PPF TFR TO GAD").alias("NARRATION"),
-           F.lit(1).alias("TRANSACTION_COUNT"),
-           F.col("SOURCE_FLAG"),
-           F.lit(other_branch).alias("BRANCH_CODE"),
-           F.col("CURRENCY"),
-           F.lit(transfer_cgl).alias("CGL"),
-           (-F.least(F.col("NET"), F.lit(0))).alias("DEBIT_AMOUNT"),
-           (-F.greatest(F.col("NET"), F.lit(0))).alias("CREDIT_AMOUNT")
-       ),
-       F.struct(
-           F.col("BATCH_ID"),
-           F.col("JOURNAL_ID"),
-           F.lit("PPF TFR TO GAD").alias("NARRATION"),
-           F.lit(1).alias("TRANSACTION_COUNT"),
-           F.col("SOURCE_FLAG"),
-           F.lit(other_branch).alias("BRANCH_CODE"),
-           F.col("CURRENCY"),
-           F.col("CGL"),
-           F.greatest(F.col("NET"), F.lit(0)).alias("DEBIT_AMOUNT"),
-           F.least(F.col("NET"), F.lit(0)).alias("CREDIT_AMOUNT")
-       ))).alias("r")).select("r.*")
-    generated_df=generated_df.groupBy("BRANCH_CODE", "CURRENCY", "CGL").agg(
-            F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
-            F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
-            F.sum("TRANSACTION_COUNT").alias("TRANSACTION_COUNT"),
-            F.first("NARRATION").alias("NARRATION"),         
-            F.first("SOURCE_FLAG").alias("SOURCE_FLAG"),      
-            F.first("BATCH_ID").alias("BATCH_ID"),
-            F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-        ).select("BRANCH_CODE", "CURRENCY", "CGL","DEBIT_AMOUNT","CREDIT_AMOUNT","BATCH_ID","JOURNAL_ID","NARRATION","TRANSACTION_COUNT","SOURCE_FLAG")
-    # Union + aggregate (final 2N + 2 rows)
-    final_df = (
-        df.unionByName(generated_df)
-    )
-
-    return final_df
+log_etl(spark,"GLIF",RUN_ID , "GLIF ETL PRCOESS STARTED",5,1,startTime)
 
 fncb_cgl_query="(SELECT FROM_CGL,TO_CGL,CGL_TYPE FROM FCNB_CGL) T1" 
 
@@ -149,162 +38,15 @@ fcnb_cgl_df = spark.read.format("jdbc") \
     .option("driver", oracle_driver) \
     .load()
 
+fcnb_currency_query="(SELECT CURRENCY_CODE,DEPOSIT_EXPENSE_FLAG,LOAN_INCOME_FLAG FROM FCNB_CURRENCY_CONFIG) T1"
 
-def monthend_posting(dl_df,fcnb_cgl_df,currency_list,posting_date_str,TARGET_BRANCH="01111",TRANSFER_CGL="0000000000"):
-    try:
-       
-        # STEP 1: BASE DF
-      
-        base_df = (
-            dl_df
-            .filter(F.col("closing_balance") != 0)
-            .withColumn("BRANCH_CODE", F.substring("glcc", 1, 5))
-            .withColumn("CURRENCY", F.substring("glcc", 6, 3))
-            .withColumn("CGL", F.substring("glcc", 9, 10))
-            # .filter(F.col("CURRENCY") != "INR")
-            .join(fcnb_cgl_df, F.col("CGL") == F.col("FROM_CGL"), "inner")
-            .select(
-                F.col("BRANCH_CODE").cast("string"),
-                F.col("CURRENCY").cast("string"),
-                F.col("CGL").cast("string"),
-                F.col("closing_balance").alias("NET"),
-                F.col("FROM_CGL").cast("string"),
-                F.col("TO_CGL").cast("string")
-            )
-            .withColumn("BATCH_ID",F.lit(BATCH_ID_LITERAL))
-            # .withColumn("JOURNAL_ID",F.lit(JOURNAL_ID))
-        )
-
-        # print("===== BASE DF SCHEMA =====")
-        # base_df.printSchema()
-
-        if base_df.rdd.isEmpty():
-            print("No eligible FCY rows found in base_df")
-            return None 
-        
-        
-        
-        # base_df.show(500,False)   
-        fcy_df = (
-        base_df
-        .select(
-            F.explode(
-                F.array(
-                # Credit FROM_CGL (if AMOUNT > 0)
-                F.struct(
-                    F.col("BRANCH_CODE").alias("branch"),
-                    F.col("CURRENCY").alias("currency"),
-                    F.col("FROM_CGL").alias("cgl"),
-                    (-F.least(F.col("NET"), F.lit(0))).alias("DEBIT_AMOUNT"),  # if NET<=0
-                    (-F.greatest(F.col("NET"), F.lit(0))).alias("CREDIT_AMOUNT"), # if NET>0
-       
-                    F.lit("FCY TRANSFER").alias("narration"),
-                    # F.col("BATCH_ID")
-                ),
-                # Debit TRANSFER_CGL at same branch (if AMOUNT > 0)
-                F.struct(
-                    F.col("BRANCH_CODE").alias("branch"),
-                    F.col("CURRENCY").alias("currency"),
-                    F.lit(TRANSFER_CGL).alias("cgl"),
-                    F.greatest(F.col("NET"), F.lit(0)).alias("DEBIT_AMOUNT"),  # if NET>0
-                    F.least(F.col("NET"), F.lit(0)).alias("CREDIT_AMOUNT"),    # if NET<=0
-      
-                    F.lit("FCY TRANSFER").alias("narration"),
-                    # F.col("BATCH_ID")
-                ),
-                # Credit TRANSFER_CGL at TARGET_BRANCH (if AMOUNT > 0)
-                F.struct(
-                    F.lit(TARGET_BRANCH).alias("branch"),
-                    F.col("CURRENCY").alias("currency"),
-                    F.lit(TRANSFER_CGL).alias("cgl"),
-                    (-F.least(F.col("NET"), F.lit(0))).alias("DEBIT_AMOUNT"),
-                    (-F.greatest(F.col("NET"), F.lit(0))).alias("CREDIT_AMOUNT"),
-       
-                    F.lit("FCY TRANSFER").alias("narration"),
-                    # F.col("BATCH_ID")
-                ),
-                # Debit TO_CGL at TARGET_BRANCH (if AMOUNT <= 0)
-                F.struct(
-                    F.lit(TARGET_BRANCH).alias("branch"),
-                    F.col("CURRENCY").alias("currency"),
-                    F.col("TO_CGL").alias("cgl"),
-                    F.greatest(F.col("NET"), F.lit(0)).alias("DEBIT_AMOUNT"),
-                    F.least(F.col("NET"), F.lit(0)).alias("CREDIT_AMOUNT"),
-                    F.lit("FCY TRANSFER").alias("narration"),
-                    # F.col("BATCH_ID")
-                )
-                )
-                ).alias("r"),
-            
-            F.col("BATCH_ID"),
-            # #F.col("JOURNAL_ID"),
-           
-            )
-        .select(
-            F.col("BATCH_ID"),
-            #F.col("JOURNAL_ID"),
-            F.col("r.branch").alias("BRANCH_CODE"),
-            F.col("r.currency").alias("CURRENCY"),
-            F.col("r.cgl").alias("CGL"),
-            F.col("r.DEBIT_AMOUNT"),
-            F.col("r.CREDIT_AMOUNT"),
-            F.col("r.narration").alias("NARRATION"),
-            F.lit("F").alias("SOURCE_FLAG"),
-            F.lit(1).alias("TRANSACTION_COUNT"),
-            F.lit(posting_date_str).cast("date").alias("TRANSACTION_DATE")
-            
-            )
-        )
-        inr_df = (
-            fcy_df.alias("fcy")
-            .filter(F.col("NARRATION") == "FCY TRANSFER")
-            .join(
-                currency_list.alias("curr"),
-                F.col("fcy.CURRENCY") == F.col("curr.CURRENCY_CODE"),
-                "inner"
-            )
-            .select(
-                F.col("BATCH_ID"),
-                #F.col("JOURNAL_ID"),
-                F.col("TRANSACTION_DATE"),
-                F.col("BRANCH_CODE"),
-                F.lit("INR").alias("CURRENCY"),
-                F.col("CGL"),
-                # (-F.col("CREDIT_AMOUNT") * F.col("CURRENCY_RATE"))
-                #     .cast(DecimalType(25,2)).alias("DEBIT_AMOUNT"),
-                # (-F.col("DEBIT_AMOUNT") * F.col("CURRENCY_RATE"))
-                #     .cast(DecimalType(25,2)).alias("CREDIT_AMOUNT"),
-                
-               F.round(
-                   -F.col("CREDIT_AMOUNT").cast("double")*F.col("CURRENCY_RATE").cast(("double")),
-                   2
-               ).cast(DecimalType(25,4)).alias("DEBIT_AMOUNT"),
-               
-               F.round(
-                   -F.col("DEBIT_AMOUNT").cast("double")*F.col("CURRENCY_RATE").cast("double"),
-                   2
-               ).cast(DecimalType(25,4)).alias("CREDIT_AMOUNT"),
-               
-                F.lit("INR VALUATION").alias("NARRATION"),
-                F.lit("F").alias("SOURCE_FLAG"),
-                F.lit(1).alias("TRANSACTION_COUNT")
-                
-                )
-            )
-        
-        # print("==========INR Output Before Aggregation=============")
-        # if debug_cgl:
-        #      print("===================Generated Four Legs===============================")
-        #      inr_df.filter(col("CGL")==debug_cgl).show(truncate=False)
-        #      return inr_df
-       
-        
-        final_df = fcy_df.unionByName(inr_df)
-        return final_df
-    
-    except Exception as e:
-        print("ERROR IN monthend_posting")
-        raise
+fcnb_currency = spark.read.format("jdbc") \
+    .option("url", oracle_url) \
+    .option("dbtable", fcnb_currency_query) \
+    .option("user", oracle_user) \
+    .option("password", oracle_password) \
+    .option("driver", oracle_driver) \
+    .load()
 
 
 
@@ -327,6 +69,7 @@ try:
     logger.info(f"=== Fetched BATCH_ID: {BATCH_ID_LITERAL} ===")
 except Exception as e:
     logger.info(f"Error fetching BATCH_SEQ via JDBC: {e}")
+    log_etl(spark,"GLIF",RUN_ID , "ERROR IN reading frm db : 201 : 361",10,3,startTime)
     spark.stop()
     exit()
 
@@ -349,14 +92,20 @@ spark_stream_path = hdfs_paths["spark_stream_path"] + manifest_filename
 oracle_tables = tables_to_read("glif")
 
 
+try:
+    log_etl(spark,"GLIF",RUN_ID , "File Reading Started",8,1,startTime)
+    files = files_to_read(spark,"glif")
+    logger.info(files)
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR READING FILES : 202 : 388",8,3,startTime)
+    spark.stop()
+    exit()
 
-# files = files_to_read(spark,"glif")
-# logger.info(files)
-# file_types_with_extra = files["stream_files"]
-# file_types_without_extra = files["non_stream_files"]
+file_types_with_extra = files["stream_files"]
+file_types_without_extra = files["non_stream_files"]
 
-# paths_to_read = [f"{HDFS_PATH}*{ft}_[0-9][0-9][0-9]*.gz" for ft in file_types_with_extra]
-# paths_to_read.extend([f"{HDFS_PATH}*{ft}.gz" for ft in file_types_without_extra])
+paths_to_read = [f"{HDFS_PATH}/{ft}_31122025_*_[0-9][0-9][0-9].gz" for ft in file_types_with_extra]
+paths_to_read.extend([f"{HDFS_PATH}/{ft}_31122025_*[!0-9].gz" for ft in file_types_without_extra])
 
 
 TRANSACTIONS = oracle_tables["TRANSACTIONS"]
@@ -369,11 +118,17 @@ BRANCH = oracle_tables["BRANCH"]
 logger.info(f"ETL date : {today}")
 logger.info(f"Oracle properties fetched successfully")
 
+try:
+    df_raw = read_patterns(spark,paths_to_read,posting_date_str,RUN_ID)
+    log_etl(spark,"GLIF",RUN_ID , "File Reading Completed",9,2,startTime)
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR READING FILES : 203 : 411",8,3,startTime)
+    spark.stop()
+    exit()
 
-# df_raw = read_patterns(spark,paths_to_read,posting_date_str,RUN_ID)
-df_raw = spark.read.text("hdfs://10.177.103.199:8022/CBS-FILES/2025-12-03/GLIF/*.gz")
+
 logger.info(f"Reading Patterns")
-
+log_etl(spark,"GLIF",RUN_ID , "Analytics Started",10,1,startTime)
 df_processed = df_raw.withColumns({
     "Id": expr("substring(value, 51, 18)"),
     "currency_code": expr("substring(value, 48, 3)")
@@ -412,15 +167,20 @@ df_with_signed_amount = df_final.withColumns({
     "Amountpve": when(df_final["Amount_final"] > 0, df_final["Amount_final"]).otherwise(0),
     "Amountnve": when(df_final["Amount_final"] < 0, df_final["Amount_final"]).otherwise(0)
 })
-df_agg = df_with_signed_amount.groupBy("Id").agg(
-    F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
-    F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
-    F.count(F.col("Id")).alias("TRANSACTION_COUNT")
-)
+
+try:
+    df_agg = df_with_signed_amount.groupBy("Id").agg(
+        F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
+        F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
+        F.count(F.col("Id")).alias("TRANSACTION_COUNT")
+    )
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in grpby  : 204 : 464",10,3,startTime)
+    spark.stop()
+    exit() 
 
 df_mapped = df_agg.withColumns({ 
-    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()), 
-    # "TRANSACTION_DATE": F.to_date(F.lit(posting_date_str)),
+    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()),
     "JOURNAL_ID": lit(None).cast(StringType()),
     "BRANCH_CODE": substring(col("Id"), 1, 5),
     "CURRENCY": substring(col("Id"), 6, 3),
@@ -464,12 +224,19 @@ try:
     logger.info(f"Branch list loaded successfully")
 except Exception as e:
     logger.error("Error {e} while fetching the branchlist from oracle.")
-    
-df_validated_branch = df_final_schema.join(
-    broadcast(branch_list.select(col("CODE").alias("BRANCH_CODE")).withColumn("IS_VALID_BRANCH", lit(1))),
-    on="BRANCH_CODE",
-    how="left"
-)
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in datafetching  : 205 : 513",10,3,startTime)
+    spark.stop()
+    exit()
+try:    
+    df_validated_branch = df_final_schema.join(
+        broadcast(branch_list.select(col("CODE").alias("BRANCH_CODE")).withColumn("IS_VALID_BRANCH", lit(1))),
+        on="BRANCH_CODE",
+        how="left"
+    )
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 206 : 523",10,3,startTime)
+    spark.stop()
+    exit()
 
 df_invalid_branches = df_validated_branch.filter(col("IS_VALID_BRANCH").isNull()).withColumn("REASON",lit("INVALID BRANCH")).select(
 "BRANCH_CODE",
@@ -505,6 +272,10 @@ try:
     logger.info("Sucessfully currencylist loaded.")
 except Exception as e:
     logger.error("Error {e} while fetching the currencylist from oracle.")
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 207: 561",10,3,startTime)
+    spark.stop()
+    exit()
+
 
 df_validated_currency = df_valid_branches.join(
     broadcast(currency_list.select(col("CURRENCY_CODE").alias("CURRENCY")).withColumn("IS_VALID_CURRENCY", lit(1))),
@@ -515,6 +286,7 @@ df_validated_currency = df_valid_branches.join(
     when(col("IS_VALID_CURRENCY").isNotNull(), col("CURRENCY"))
     .otherwise(lit("invalid_CURRENCY"))
 )
+
 
 df_invalid_currency = df_validated_currency.where(col("VALIDATED_CURRENCY") == "invalid_CURRENCY").withColumn("REASON",lit("INVALID CURRENCY")).select(
 "BRANCH_CODE",
@@ -533,7 +305,8 @@ df_valid_currency = df_validated_currency.where(col("VALIDATED_CURRENCY") != "in
 
 df_valid_currency =  df_valid_currency.drop(col("VALIDATED_CURRENCY"),col("IS_VALID_CURRENCY"))
 
-invalid_df = df_invalid_branches.unionByName(df_invalid_currency).withColumn("DATE",to_date(lit(posting_date_str),"dd-mm-yy"))
+
+invalid_df = df_invalid_branches.unionByName(df_invalid_currency).withColumn("DATE",F.to_date(F.lit(posting_date_str)))
 
 # # ===================================================================================
 #                 #    || CGL ||
@@ -553,35 +326,51 @@ try:
         .load()
     logger.info("Sucessfully cgl list loaded")
 except Exception as e:
-    logger.error("Error {e} while loading cgl list")   
-df_validated = df_valid_currency.join(
-    broadcast(master_cgl_list.select(col("CGL_NUMBER").alias("CGL")).withColumn("IS_VALID", lit(1))),
-    on="CGL",
-    how="left"
-).withColumn(
-    "VALIDATED_CGL",
-    when(col("IS_VALID").isNotNull(), col("CGL"))
-    .when(col("CGL").startswith("5"), lit("5000000000"))
-    .otherwise(lit("1111111111"))
-).withColumn(
-    "NARRATION1",   
-    when(col("IS_VALID").isNull(), 
-         concat(lit("INVALID CGL: "), col("CGL"), lit(" - "), col("NARRATION")))
-    .otherwise(col("NARRATION"))
-)
+    logger.error("Error {e} while loading cgl list")  
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in fetching data   : 208: 617",10,3,startTime)
+    spark.stop()
+    exit()
+
+try: 
+    df_validated = df_valid_currency.join(
+        broadcast(master_cgl_list.select(col("CGL_NUMBER").alias("CGL")).withColumn("IS_VALID", lit(1))),
+        on="CGL",
+        how="left"
+    ).withColumn(
+        "VALIDATED_CGL",
+        when(col("IS_VALID").isNotNull(), col("CGL"))
+        .when(col("CGL").startswith("5"), lit("5000000000"))
+        .otherwise(lit("1111111111"))
+    ).withColumn(
+        "NARRATION1",   
+        when(col("IS_VALID").isNull(), 
+             concat(lit("INVALID CGL: "), col("CGL"), lit(" - "), col("NARRATION")))
+        .otherwise(col("NARRATION"))
+    )
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 208: 638",10,3,startTime)
+    spark.stop()
+    exit()
+
 
 
 import pyspark.sql.functions as F
 
-result = df_validated.groupBy("VALIDATED_CGL", "CURRENCY", "BRANCH_CODE").agg(
-    F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
-    F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
-    F.sum("TRANSACTION_COUNT").alias("TRANSACTION_COUNT"),
-    F.first("NARRATION1").alias("NARRATION"),          
-    F.first("SOURCE_FLAG").alias("SOURCE_FLAG"),      
-    F.first("BATCH_ID").alias("BATCH_ID"),
-    F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-).select(F.col("VALIDATED_CGL").alias("CGL"), "CURRENCY", "BRANCH_CODE","NARRATION", "SOURCE_FLAG", "BATCH_ID", "DEBIT_AMOUNT", "CREDIT_AMOUNT", "TRANSACTION_COUNT","JOURNAL_ID")
+
+try:
+    result = df_validated.groupBy("VALIDATED_CGL", "CURRENCY", "BRANCH_CODE").agg(
+        F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
+        F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
+        F.sum("TRANSACTION_COUNT").alias("TRANSACTION_COUNT"),
+        F.first("NARRATION1").alias("NARRATION"),          
+        F.first("SOURCE_FLAG").alias("SOURCE_FLAG"),      
+        F.first("BATCH_ID").alias("BATCH_ID"),
+        F.first("JOURNAL_ID").alias("JOURNAL_ID"),
+    ).select(F.col("VALIDATED_CGL").alias("CGL"), "CURRENCY", "BRANCH_CODE","NARRATION", "SOURCE_FLAG", "BATCH_ID", "DEBIT_AMOUNT", "CREDIT_AMOUNT", "TRANSACTION_COUNT","JOURNAL_ID")
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID , "ERROR in grpby  : 209: 658",10,3,startTime)
+    spark.stop()
+    exit()
 
 # ===================================================================================
 #    || Balancing and PPF Logic ||
@@ -593,18 +382,24 @@ result_net1 = result.withColumn(
     .otherwise(lit("1111111111"))
 )
 
-new_result =result_net1.groupBy("BRANCH_CODE","CURRENCY",col("check").alias("CGL")).agg(
-    F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
-    F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
-    F.first("NARRATION").alias("NARRATION"),          
-    F.first("SOURCE_FLAG").alias("SOURCE_FLAG"),      
-    F.first("BATCH_ID").alias("BATCH_ID"),
-    F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-    F.first("TRANSACTION_COUNT").alias("TRANSACTION_COUNT")
-    ).withColumn(
-    "NET", 
-    col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
-)
+try:
+    new_result =result_net1.groupBy("BRANCH_CODE","CURRENCY",col("check").alias("CGL")).agg(
+        F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
+        F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
+        F.first("NARRATION").alias("NARRATION"),          
+        F.first("SOURCE_FLAG").alias("SOURCE_FLAG"),      
+        F.first("BATCH_ID").alias("BATCH_ID"),
+        F.first("JOURNAL_ID").alias("JOURNAL_ID"),
+        F.first("TRANSACTION_COUNT").alias("TRANSACTION_COUNT")
+        ).withColumn(
+        "NET", 
+        col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
+    )
+except Exception as e:
+    log_etl(spark,"GLIF", RUN_ID , "ERROR in grpby  : 210: 686",10,3,startTime)
+    spark.stop()
+    exit()
+
 
 synthetic = new_result.filter(col("NET") != 0).select(
     col("CGL"),col("CURRENCY"),col("BRANCH_CODE"),
@@ -616,10 +411,13 @@ synthetic = new_result.filter(col("NET") != 0).select(
     col("BATCH_ID"),
     col("JOURNAL_ID"))
 
-
-final_balanced = result.unionByName(synthetic).withColumn("TRANSACTION_DATE",F.to_date(F.lit(posting_date_str)))
-
-final_balanced = result.unionByName(synthetic)
+try:
+    final_balanced = result.unionByName(synthetic).withColumn("TRANSACTION_DATE",F.to_date(F.lit(posting_date_str)))
+    final_balanced = result.unionByName(synthetic)
+except Exception as e:
+    log_etl(spark,"GLIF",RUN_ID ,"ERROR in uniopn : 211: 705",10,3,startTime)
+    spark.stop()
+    exit()
 
 PPF_Posting_df = ppf_postings(final_balanced)
 PPF_Posting_df.cache()
@@ -627,32 +425,35 @@ PPF_Posting_df.cache()
 
 PPF_Posting = PPF_Posting_df.withColumn("TRANSACTION_DATE",F.to_date(F.lit(posting_date_str)))
 
-
+log_etl(spark,"GLIF",RUN_ID , "Transactions Calculated",11,2,startTime)
 # ===============================================================================
 # Journal entries data from the database
 # ===============================================================================
 
 filter_date_str = yesterday
 
-sql_query = f"""
-(
-    SELECT BRANCH_CODE, CURRENCY, CGL,DEBIT_AMOUNT,CREDIT_AMOUNT,BATCH_ID,JOURNAL_ID,NARRATION,TRANSACTION_COUNT,SOURCE_FLAG 
-    FROM {TRANSACTIONS} 
-    WHERE TRUNC(TRANSACTION_DATE) = TO_DATE('{filter_date_str}', 'YYYY-MM-DD') and SOURCE_FLAG='J'
-) T1
-"""
+
 if(RUN_ID>1):
+    sql_query = f"""(
+                        SELECT BRANCH_CODE, CURRENCY, CGL,DEBIT_AMOUNT,CREDIT_AMOUNT,BATCH_ID,JOURNAL_ID,NARRATION,TRANSACTION_COUNT,SOURCE_FLAG 
+                        FROM {TRANSACTIONS} 
+                        WHERE TRUNC(TRANSACTION_DATE) = TO_DATE('{filter_date_str}', 'YYYY-MM-DD') and SOURCE_FLAG='J'
+                    ) T1"""
     try:
-        journal_entries = spark.read.format("jdbc") \
-            .option("url", oracle_url) \
-            .option("dbtable", sql_query) \
-            .option("user", oracle_user) \
-            .option("password", oracle_password) \
-            .option("driver", oracle_driver) \
-            .load()
+        journal_entries = read_oracle(spark,sql_query)
+        # spark.read.format("jdbc") \
+        #     .option("url", oracle_url) \
+        #     .option("dbtable", sql_query) \
+        #     .option("user", oracle_user) \
+        #     .option("password", oracle_password) \
+        #     .option("driver", oracle_driver) \
+        #     .load()
         logger.info("Journal entries loaded from db for {filter_date_str} date.")
     except Exception as e:
         logger.error("Error {e} while loading Journal entries for {filter_date_str} date.")
+        log_etl(spark,"GLIF",RUN_ID , "ERROR in db reading  : 212: 741",10,3,startTime)
+        spark.stop()
+        exit()
 
     PPF_Posting_df = PPF_Posting_df.unionByName(journal_entries).groupBy("CGL","BRANCH_CODE","CURRENCY").agg(
         F.sum(col("DEBIT_AMOUNT")).alias("DEBIT_AMOUNT"),
@@ -679,42 +480,47 @@ processed_df=processed_df.select(concat(
     col("CURRENCY"),
     col("CGL")).alias("glcc"), 
     col("BALANCE"))
+
 try:
-    # yesterday=yesterday.strftime("%Y-%m-%d")
-    BALANCE_query = f"""(select CGL, CURRENCY, BRANCH_CODE, BALANCE from GL_BALANCE_ST where BALANCE_DATE = TO_DATE('{yesterday}', 'YYYY-MM-DD')) a"""
-    gl_yesterday = spark.read \
-        .format("jdbc") \
-        .option("url", oracle_url) \
-        .option("dbtable", BALANCE_query) \
-        .option("user", oracle_user) \
-        .option("password", oracle_password) \
-        .option("driver", oracle_driver) \
-        .load()
-    
-     
-    print("yesterday gl")
-    gl_yesterday.show()
-    print("yesterday gl")
-    df_gl= gl_yesterday.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"), col("BALANCE"))
-    df_gl.show(10,False)
     df_gl = spark.read.format("delta").load(GL_DATALAKE_PATH).filter(col("BALANCE_DATE") == yesterday)
-    df_gl = df_gl.select(col("GLCC").alias("glcc"),col("closing_balance").cast("decimal(25,4)").alias("BALANCE"))
+    df_gl = df_gl.select(col("GLCC").alias("glcc"),col("closing_balance").cast(DecimalType(25,4)).alias("BALANCE"))
     logger.info("Data loaded from deltalake.")
 except Exception as e:
-    df_gl=spark.createDataFrame([],schema="""glcc STRING, BALANCE DECIMAL(25,4)""")
-    logger.error("Error {e} while loading data from delta lake.")
-
-
-combined_df = processed_df.unionAll(df_gl)
-
-# combined_df.show(10,False)
+        try:
+            yesterday=yesterday.strftime("%Y-%m-%d")
+            BALANCE_query = f"""(select CGL, CURRENCY, BRANCH_CODE, BALANCE from GL_BALANCE_ST where BALANCE_DATE = TO_DATE('{yesterday}', 'YYYY-MM-DD')) a"""
+            gl_yesterday = read_oracle(spark,BALANCE_query)
+            # spark.read \
+            #     .format("jdbc") \
+            #     .option("url", oracle_url) \
+            #     .option("dbtable", BALANCE_query) \
+            #     .option("user", oracle_user) \
+            #     .option("password", oracle_password) \
+            #     .option("driver", oracle_driver) \
+            #     .load()     
+            print("yesterday gl")
+            print("yesterday gl")
+            df_gl= gl_yesterday.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"), col("BALANCE"))
+            
+        except Exception as e:
+        
+            df_gl=spark.createDataFrame([],schema="""glcc STRING, BALANCE DECIMAL(25,4)""")
+            logger.error("Error {e} while loading data from delta lake.")
+            log_etl(spark,"GLIF",RUN_ID , "Error while loading data from delta lake. : 213: 792",10,3,startTime)
+            spark.stop()
+try:
+    combined_df = processed_df.unionAll(df_gl)
+except Exception as e:
+    logger.error("Error in union")
+    log_etl(spark,"GLIF",RUN_ID , "Error while union : 214: 800",10,3,startTime)
+    spark.stop()
+    exit()
 final_aggregated_df = combined_df.groupBy("glcc").agg(sum("BALANCE").alias("BALANCE"))
 
 final_aggregated_df=final_aggregated_df.withColumn("BALANCE_DATE",F.to_date(F.lit(posting_date_str)))
 
-dl_df=final_aggregated_df.select("glcc",col("BALANCE").alias("closing_balance").cast("decimal(25,4)"),"BALANCE_DATE")
+dl_df=final_aggregated_df.select("glcc",col("BALANCE").alias("closing_balance").cast(DecimalType(25,4)),"BALANCE_DATE")
 
-dl_df.show(20,False)
 
 # ======================================================================================================================================================
 #                                         Month End FCNB 
@@ -725,31 +531,15 @@ dl_df.show(20,False)
 monthend = check_MonthEnd()
 logger.info(f"monthend is {monthend}")
 if(monthend):
-    FCNB_transactions = monthend_posting(dl_df,fcnb_cgl_df,currency_list,posting_date_str)
-    FCNB_transactions.show(20,False)
-    try:
-        FCNB_transactions.write \
-                .format("jdbc") \
-                .option("url", oracle_url) \
-                .option("dbtable", TRANSACTIONS) \
-                .option("user", oracle_user) \
-                .option("password", oracle_password) \
-                .option("driver", oracle_driver) \
-                .mode("append") \
-                .save()
-        logger.info("=== Data successfully written to transaction table Oracle DB ===") 
-    except Exception as e:
-        logger.error(f"Error writing to Oracle DB: {e}") 
-
+    FCNB_transactions = monthend_posting(dl_df,fcnb_cgl_df,fcnb_currency,currency_list,posting_date_str)
     FCNB_result=FCNB_transactions.withColumn(
     "BALANCE", 
     col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
     ).select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"),col("BALANCE").alias("closing_balance"), F.lit(posting_date_str).cast(DateType()).alias("BALANCE_DATE"))
-
     dl_df = dl_df.unionAll(FCNB_result)
     
 
-# # ==============================================================================================================
+# # # ==============================================================================================================
 dl_df =dl_df.groupBy("glcc").agg(
     sum("closing_balance").alias("BALANCE"),
     F.first("BALANCE_DATE").alias("BALANCE_DATE")
@@ -784,10 +574,9 @@ df_converted = (
    )
    .withColumn(
        "INR_BALANCE",
-       (col("BALANCE") * col("APPLIED_RATE")).cast(DecimalType(25, 4))
+       round(col("BALANCE") * col("APPLIED_RATE"),2).cast(DecimalType(25, 2))
    )
 )
-# df_converted.show(20,False)
 balance_df = df_converted.select(
    "CGL",
    "CURRENCY",
@@ -796,11 +585,28 @@ balance_df = df_converted.select(
    "INR_BALANCE",
    "BALANCE_DATE"
 )
-# ==================================================================================
-deltalake_final = balance_df.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"),col("BALANCE").alias("closing_balance"), F.lit(posting_date_str).cast(DateType()).alias("BALANCE_DATE"))
+balance_df.cache()
+
+opening_balance_df = balance_df.select("CGL",
+   "CURRENCY",
+   "BRANCH_CODE",
+   "BALANCE",
+   "INR_BALANCE").F.lit(tommorrow_date).cast(DateType()).alias("BALANCE_DATE")
+
+ 
 # ==================================================================================
 
-deltalake_final.write.format("delta").mode("append").save(GL_DATALAKE_PATH)
+deltalake_final = opening_balance_df.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"),col("BALANCE").cast(DecimalType(25,4)).alias("closing_balance"), col("BALANCE_DATE"))
+# ==================================================================================
+log_etl(spark,"GLIF",RUN_ID , "Balance Calculated",12,2,startTime) 
+try:
+    deltalake_final.write.format("delta").mode("append").save(GL_DATALAKE_PATH)
+except Exception as e:
+    logger.info(f"Error during saving in datalake  {e}")
+    log_etl(spark,"GLIF",RUN_ID ,"Error saving gl_balance : 216: 910",14,3,startTime)
+    spark.stop()
+    exit()
+
 try:
     logger.info("\nCreating manifest file for Spark Stream trigger...")
 
@@ -816,13 +622,16 @@ try:
     logger.info(f"Manifest file uploaded to: {spark_stream_path}")
 except Exception as e:
     logger.info(f"Error during Delta or manifest stage: {e}")
-    sys.exit(1) 
+    log_etl(spark,"GLIF",RUN_ID , "Error writing Mnaifest: 216: 910",14,3,startTime)
+    spark.stop()
+    exit()
 
 
-# ==============================================================================================================
+# ================== Writing Balance into Oracle as ETL+1 ============================================================================================
 
 try:
-    balance_df.write \
+    write_oracle(opening_balance_df,BALANCE)
+    opening_balance_df.write \
             .format("jdbc") \
             .option("url", oracle_url) \
             .option("dbtable", BALANCE) \
@@ -832,39 +641,67 @@ try:
             .mode("append") \
             .save()
     logger.info("Successfully data written into balance table")
+    log_etl(spark,"GLIF",RUN_ID , "Closing Balance updated",14,2,startTime)
 except Exception as e:
     logger.info(f"Error writing INVALID records: {e}")
+    log_etl(spark,"GLIF",RUN_ID , "Error writing to Oracle DB: 217: 930",14,3,startTime)
+    spark.stop()
+    exit()
 
 try:
-    PPF_Posting.write \
-            .format("jdbc") \
-            .option("url", oracle_url) \
-            .option("dbtable", TRANSACTIONS) \
-            .option("user", oracle_user) \
-            .option("password", oracle_password) \
-            .option("driver", oracle_driver) \
-            .mode("append") \
-            .save()
+    write_oracle(PPF_Posting,TRANSACTIONS)
+    # PPF_Posting.write \
+    #         .format("jdbc") \
+    #         .option("url", oracle_url) \
+    #         .option("dbtable", TRANSACTIONS) \
+    #         .option("user", oracle_user) \
+    #         .option("password", oracle_password) \
+    #         .option("driver", oracle_driver) \
+    #         .mode("append") \
+    #         .save()
     logger.info("=== Data successfully written to transaction table Oracle DB ===") 
+    log_etl(spark,"GLIF",RUN_ID , "Transactions posting posted",15,2,startTime)
 except Exception as e:
     logger.info(f"Error writing to Oracle DB: {e}")
-
-
+    log_etl(spark,"GLIF",RUN_ID , "Error writing Transactions to Oracle DB: 218: 947",16,3,startTime)
+    spark.stop()
+    exit()
+try:
+    write_oracle(FCNB_transactions,TRANSACTIONS)
+    # FCNB_transactions.write \
+    #         .format("jdbc") \
+    #         .option("url", oracle_url) \
+    #         .option("dbtable", TRANSACTIONS) \
+    #         .option("user", oracle_user) \
+    #         .option("password", oracle_password) \
+    #         .option("driver", oracle_driver) \
+    #         .mode("append") \
+    #         .save()
+    logger.info("=== Data successfully written to transaction table Oracle DB ===")
+    log_etl(spark,"GLIF", RUN_ID , "FNCB Transaction Posted",13,2,startTime) 
+except Exception as e:
+    logger.error(f"Error writing to Oracle DB: {e}") 
+    log_etl(spark,"GLIF",RUN_ID ,"Error in posting FNCB Transaction Oracle DB: 215: 833",13,3,startTime)
+    spark.stop()
+    exit()
 
 try:
-    invalid_df.write \
-            .format("jdbc") \
-            .option("url", oracle_url) \
-            .option("dbtable", INVALID) \
-            .option("user", oracle_user) \
-            .option("password", oracle_password) \
-            .option("driver", oracle_driver) \
-            .mode("append") \
-            .save()
+    write_oracle(invalid_df,INVALID)
+    # invalid_df.write \
+    #         .format("jdbc") \
+    #         .option("url", oracle_url) \
+    #         .option("dbtable", INVALID) \
+    #         .option("user", oracle_user) \
+    #         .option("password", oracle_password) \
+    #         .option("driver", oracle_driver) \
+    #         .mode("append") \
+    #         .save()
     logger.info("=== Invalid records written to DB ===")
+    log_etl(spark,"GLIF",RUN_ID , "Invalid data saved",17,2,startTime)
 except Exception as e:
     logger.info(f"Error writing INVALID records: {e}")
-
-
-
+    log_etl(spark,"GLIF",RUN_ID ,"Error writing invaliid data to Oracle DB: 219: 965",17,3,startTime)
+    spark.stop()
+    exit()
+log_etl(spark,"GLIF",RUN_ID , "ETL PRCOESS Ended",18,2,startTime)
 spark.stop()
