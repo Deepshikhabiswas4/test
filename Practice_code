@@ -1,21 +1,36 @@
-# ============================================
-# Balance Final DF (ETL Date Closing Balance)
-# ============================================
-
-balance_df = df_converted.select(
-    "CGL",
-    "CURRENCY",
-    "BRANCH_CODE",
-    "BALANCE",
-    "INR_BALANCE"
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col, lit, concat, broadcast
 )
-
-balance_df.cache()
-logger.info("=== Closing Balance Calculated Successfully ===")
+from pyspark.sql.types import DateType, DecimalType
+from datetime import timedelta
+import pyspark.sql.functions as F
 
 
 # ============================================
-# Opening Balance for ETL+1 Date
+# Spark Session
+# ============================================
+
+spark = SparkSession.builder.appName("OpeningBalanceForwardJob").getOrCreate()
+
+
+# ============================================
+# Configurations
+# ============================================
+
+oracle_url = "<YOUR_ORACLE_JDBC_URL>"
+oracle_user = "<YOUR_USERNAME>"
+oracle_password = "<YOUR_PASSWORD>"
+oracle_driver = "oracle.jdbc.driver.OracleDriver"
+
+GL_BALANCE_TABLE = "GL_BALANCE"
+BALANCE_TABLE = "BALANCE"
+
+GL_DATALAKE_PATH = "<YOUR_DELTA_PATH>"
+
+
+# ============================================
+# Get ETL Dates
 # ============================================
 
 etl_date = get_etl_date(spark)
@@ -24,31 +39,61 @@ etl_plus_1_date = etl_date + timedelta(days=1)
 etl_date_str = etl_date.strftime("%Y-%m-%d")
 etl_plus_1_str = etl_plus_1_date.strftime("%Y-%m-%d")
 
-logger.info(f"ETL Date (Closing Balance Date)  : {etl_date_str}")
-logger.info(f"ETL+1 Date (Opening Balance Date): {etl_plus_1_str}")
+logger.info(f"ETL Closing Balance Date   : {etl_date_str}")
+logger.info(f"ETL+1 Opening Balance Date : {etl_plus_1_str}")
 
 
 # ============================================
-# Create Opening Balance DF for ETL+1
+# Step 1: Read Closing Balance from Oracle GL_BALANCE Table
 # ============================================
 
-opening_balance_df = balance_df.withColumn(
+logger.info("=== Reading Closing Balance from GL_BALANCE Table ===")
+
+gl_balance_query = f"""
+(
+    SELECT
+        CGL,
+        CURRENCY,
+        BRANCH_CODE,
+        BALANCE,
+        INR_BALANCE
+    FROM GL_BALANCE
+    WHERE BALANCE_DATE = TO_DATE('{etl_date_str}', 'YYYY-MM-DD')
+) T1
+"""
+
+closing_balance_df = spark.read.format("jdbc") \
+    .option("url", oracle_url) \
+    .option("dbtable", gl_balance_query) \
+    .option("user", oracle_user) \
+    .option("password", oracle_password) \
+    .option("driver", oracle_driver) \
+    .load()
+
+logger.info("=== Closing Balance Loaded Successfully ===")
+
+
+# ============================================
+# Step 2: Create Opening Balance DF for ETL+1
+# ============================================
+
+opening_balance_df = closing_balance_df.withColumn(
     "BALANCE_DATE",
-    F.lit(etl_plus_1_str).cast(DateType())
+    lit(etl_plus_1_str).cast(DateType())
 )
 
 logger.info("=== Opening Balance DF Created for ETL+1 ===")
 
 
 # ============================================
-# Year End Exception Rule (31st March)
+# Step 3: Year End Exception Rule (31st March)
 # ============================================
 
 if etl_date.month == 3 and etl_date.day == 31:
 
     logger.info("=== Year End Detected: Applying BAL_FWD Rule ===")
 
-    # Check Active Financial Year
+    # Active Financial Year Check
     cal_query = """
     (SELECT ACTIVE_FLAG FROM CALENDER_CONFIG WHERE ACTIVE_FLAG = 1) T1
     """
@@ -78,7 +123,7 @@ if etl_date.month == 3 and etl_date.day == 31:
             .option("driver", oracle_driver) \
             .load()
 
-        # Apply BAL_FWD = 1 filter
+        # Apply BAL_FWD Filter
         opening_balance_df = opening_balance_df.join(
             broadcast(cgl_master),
             opening_balance_df["CGL"] == cgl_master["CGL_NUMBER"],
@@ -96,7 +141,7 @@ if etl_date.month == 3 and etl_date.day == 31:
 
 
 # ============================================
-# Write Opening Balance into Delta Lake (ETL+1)
+# Step 4: Write Opening Balance into Delta Lake
 # ============================================
 
 deltalake_final = opening_balance_df.select(
@@ -113,29 +158,29 @@ try:
     logger.info("=== Opening Balance Saved into Delta Lake for ETL+1 ===")
 
 except Exception as e:
-    logger.error(f"Error writing Opening Balance into Delta Lake: {e}")
+    logger.error(f"Error writing into Delta Lake: {e}")
     spark.stop()
     exit()
 
 
 # ============================================
-# Write Opening Balance into Oracle Balance Table
+# Step 5: Write Opening Balance into Oracle BALANCE Table
 # ============================================
 
 try:
     opening_balance_df.write \
         .format("jdbc") \
         .option("url", oracle_url) \
-        .option("dbtable", BALANCE) \
+        .option("dbtable", BALANCE_TABLE) \
         .option("user", oracle_user) \
         .option("password", oracle_password) \
         .option("driver", oracle_driver) \
         .mode("append") \
         .save()
 
-    logger.info("=== Opening Balance Written into Oracle for ETL+1 Successfully ===")
+    logger.info("=== Opening Balance Written into Oracle Successfully ===")
 
 except Exception as e:
-    logger.error(f"Error writing Opening Balance into Oracle Table: {e}")
+    logger.error(f"Error writing into Oracle BALANCE Table: {e}")
     spark.stop()
     exit()
