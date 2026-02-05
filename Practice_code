@@ -1,13 +1,13 @@
-from pyspark.sql.functions import col, substring, trim, lit
+from pyspark.sql.functions import col, substring, trim, upper
 from pyspark.sql.types import StringType, DecimalType, DateType
-from decimal import Decimal
 
 # =====================================================
-# Common imports (already present in your framework)
+# Spark & common utilities (already defined in common)
 # =====================================================
-spark = create_spark()                     # from common
-HDFS_BASE = get_hdfs_base()                # from common
-ORACLE_URL = oracle_url                   # from common
+spark = create_spark()
+HDFS_BASE = get_hdfs_base()
+
+ORACLE_URL = oracle_url
 ORACLE_USER = oracle_user
 ORACLE_PASSWORD = oracle_password
 ORACLE_DRIVER = oracle_driver
@@ -15,14 +15,16 @@ ORACLE_DRIVER = oracle_driver
 # =====================================================
 # Paths
 # =====================================================
-GLIF_INPUT_PATH = f"{HDFS_BASE}/glif/input/*"
 GLIF_DELTA_PATH = f"{HDFS_BASE}/glif/delta"
 
 # =====================================================
-# Read GLIF file (.txt / .gz supported automatically)
+# Read GLIF using EXISTING common function
+# (DO NOT change this part in your pipeline)
 # =====================================================
-raw_df = spark.read.text(GLIF_INPUT_PATH) \
-    .withColumnRenamed("value", "raw_record")
+raw_df = df_raw   # coming from your 600-line code
+
+# Ensure consistent column name
+raw_df = raw_df.withColumnRenamed(raw_df.columns[0], "raw_record")
 
 # =====================================================
 # Read substring metadata from DB
@@ -30,12 +32,12 @@ raw_df = spark.read.text(GLIF_INPUT_PATH) \
 metadata_query = """
 (
     SELECT
-        COLUMNNAME,
+        UPPER(COLUMNNAME)   AS COLUMNNAME,
         STARTVALUE,
         ENDVALUE,
-        DATA_TYPE
+        UPPER(DATA_TYPE)    AS DATA_TYPE
     FROM FINCORE.TOTALDATAPARAMETERS
-    WHERE TOBEINCLUDED = 'Y'
+    WHERE UPPER(TOBEINCLUDED) = 'Y'
     ORDER BY STARTVALUE
 ) T
 """
@@ -51,7 +53,7 @@ metadata_df = spark.read.format("jdbc") \
 metadata = metadata_df.collect()
 
 if not metadata:
-    raise Exception("GLIF metadata table is empty. Aborting.")
+    raise Exception("No GLIF metadata found in DB. Aborting parse.")
 
 # =====================================================
 # Build dynamic substring expressions
@@ -62,7 +64,7 @@ for row in metadata:
     col_name = row["COLUMNNAME"]
     start_pos = int(row["STARTVALUE"])
     end_pos = int(row["ENDVALUE"])
-    data_type = row["DATA_TYPE"].upper()
+    data_type = row["DATA_TYPE"]
 
     length = end_pos - start_pos + 1
 
@@ -87,16 +89,7 @@ for row in metadata:
 final_df = raw_df.select(*select_exprs)
 
 # =====================================================
-# Currency handling (INR default-safe)
-# =====================================================
-if "CURRENCY_CODE" in final_df.columns:
-    final_df = final_df.withColumn(
-        "CURRENCY_CODE",
-        trim(col("CURRENCY_CODE"))
-    )
-
-# =====================================================
-# Write to Delta (schema evolves via DB)
+# Write to Delta (schema controlled by DB)
 # =====================================================
 final_df.write \
     .format("delta") \
