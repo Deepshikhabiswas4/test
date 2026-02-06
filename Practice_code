@@ -1,53 +1,72 @@
 from pyspark.sql import functions as F
-from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
+from pyspark.sql.types import (
+    StringType,
+    IntegerType,
+    LongType,
+    DecimalType
+)
+
+from common.properties import get_hdfs_base
 
 
 def process_single_file_dynamic(
     spark,
-    etl_date,
-    run_id,
     file_path,
     file_name
 ):
     """
     Reads ONE CBS / GLIF file, dynamically parses it using DB metadata,
-    and returns the final dataframe (BUSINESS COLUMNS ONLY).
+    and returns:
+      1) final dataframe (business columns only)
+      2) target delta lake path
+      3) record count
     """
 
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
     # 1. Detect FILE TYPE from file name
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
     file_name_upper = file_name.upper()
 
     if file_name_upper.startswith("GLIF"):
         file_type = "GLIF"
+        delta_sub_path = "DATA-LAKE/GLIF"
 
     elif file_name_upper.startswith("INV"):
         file_type = "INV"
+        delta_sub_path = "DATA-LAKE/BANCS24/INV"
 
     elif file_name_upper.startswith("BOR"):
         file_type = "BOR"
+        delta_sub_path = "DATA-LAKE/BANCS24/BOR"
 
     elif file_name_upper.startswith("GLCCTA"):
         file_type = "GLCCTA"
+        delta_sub_path = "DATA-LAKE/BANCS24/GLCCTA"
 
     elif file_name_upper.startswith("GLCCGEN"):
         file_type = "GLCCGEN"
+        delta_sub_path = "DATA-LAKE/BANCS24/GLCCGEN"
 
     else:
-        raise Exception(f"Unsupported file type: {file_name}")
+        raise Exception(f"Unsupported file name: {file_name}")
 
-    # ---------------------------------------------------------------
-    # 2. Read SINGLE raw file
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 2. Resolve delta lake path
+    # -----------------------------------------------------------
+    HDFS_BASE = get_hdfs_base()
+    target_delta_path = f"{HDFS_BASE}/{delta_sub_path}"
+
+    # -----------------------------------------------------------
+    # 3. Read SINGLE raw file
+    # -----------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
         .withColumnRenamed("value", "RAW_RECORD")
     )
 
-    # ---------------------------------------------------------------
-    # 3. Read metadata dynamically from DB
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 4. Read metadata dynamically from DB
+    # -----------------------------------------------------------
     metadata_df = (
         spark.table("FINCORE.TOTALDATAPARAMETERS")
         .filter(F.upper(F.col("FILE_TYPE")) == file_type)
@@ -66,9 +85,9 @@ def process_single_file_dynamic(
     if not metadata:
         raise Exception(f"No metadata found for FILE_TYPE = {file_type}")
 
-    # ---------------------------------------------------------------
-    # 4. Build substring expressions dynamically
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 5. Build substring expressions dynamically
+    # -----------------------------------------------------------
     select_exprs = []
 
     for row in metadata:
@@ -97,9 +116,16 @@ def process_single_file_dynamic(
 
         select_exprs.append(final_col.alias(col_name))
 
-    # ---------------------------------------------------------------
-    # 5. Create FINAL dataframe (NO system columns)
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------------
+    # 6. Build FINAL dataframe (business columns only)
+    # -----------------------------------------------------------
     final_df = raw_df.select(*select_exprs)
 
-    return final_df
+    # -----------------------------------------------------------
+    # 7. Persist once → avoid double computation
+    # -----------------------------------------------------------
+    final_df = final_df.persist()
+
+    record_count = final_df.count()
+
+    return final_df, target_delta_path, record_count
