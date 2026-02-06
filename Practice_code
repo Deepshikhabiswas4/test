@@ -90,4 +90,16 @@ def process_single_file_dynamic(
             final_col = base_col.cast(LongType())
 
         elif data_type in ("DECIMAL", "NUMBER"):
-            final_col = base_col.cast(DecimalType
+            final_col = base_col.cast(DecimalType(38, 18))
+
+        else:
+            raise Exception(f"Unsupported DATA_TYPE: {data_type}")
+
+        select_exprs.append(final_col.alias(col_name))
+
+    # ---------------------------------------------------------------
+    # 5. Create FINAL dataframe (NO system columns)
+    # ---------------------------------------------------------------
+    final_df = raw_df.select(*select_exprs)
+
+    return final_df
