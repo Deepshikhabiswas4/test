@@ -129,3 +129,51 @@ def process_single_file_dynamic(
     record_count = final_df.count()
 
     return final_df, target_delta_path, record_count
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from common.properties import get_hdfs_base
+
+
+def get_delta_path_by_file_type(file_type):
+    """
+    Returns delta lake path based on FILE TYPE.
+    Centralized here so ETL code stays clean.
+    """
+
+    HDFS_BASE = get_hdfs_base()
+    file_type = file_type.upper()
+
+    if file_type == "GLIF":
+        return f"{HDFS_BASE}/DATA-LAKE/GLIF"
+
+    elif file_type == "INV":
+        return f"{HDFS_BASE}/DATA-LAKE/BANCS24/INV"
+
+    elif file_type == "BOR":
+        return f"{HDFS_BASE}/DATA-LAKE/BANCS24/BOR"
+
+    elif file_type == "GLCCTA":
+        return f"{HDFS_BASE}/DATA-LAKE/BANCS24/GLCCTA"
+
+    elif file_type == "GLCCGEN":
+        return f"{HDFS_BASE}/DATA-LAKE/BANCS24/GLCCGEN"
+
+    else:
+        raise Exception(f"Unsupported FILE TYPE: {file_type}")
+
