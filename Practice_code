@@ -1,9 +1,10 @@
 from pyspark.sql import functions as F
 from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
 
-from common.fileUtil import get_delta_path_by_file_type
-from common.dateUtil import get_etl_date
 from common.fileUtil import paths_for_read
+from common.dateUtil import get_etl_date
+from common.fileUtil import get_delta_path_by_file_type
+from common.oracleUtil import read_oracle
 
 
 def process_single_file_dynamic(spark, file_name):
@@ -16,36 +17,35 @@ def process_single_file_dynamic(spark, file_name):
     today_str = etl_date.strftime("%d%m%Y")
 
     # ---------------------------------------------------------------
-    # detecting file type
+    # detect file type (LOWER CASE)
     # ---------------------------------------------------------------
-    file_name_upper = file_name.upper()
-    file_type = ""
-    path_type = ""
-    if file_name_upper.startswith("GLIF"):
-        file_type = "GLIF"
+    file_name_lower = file_name.lower()
+
+    if file_name_lower.startswith("glif"):
+        file_type = "glif"
         path_type = "glif"
 
-    elif file_name_upper.startswith("INV"):
-        file_type = "INVTOGL"
+    elif file_name_lower.startswith("inv"):
+        file_type = "invtogl"
         path_type = "bancs24"
 
-    elif file_name_upper.startswith("BOR"):
-        file_type = "BORTOGL"
+    elif file_name_lower.startswith("bor"):
+        file_type = "bortogl"
         path_type = "bancs24"
 
-    elif file_name_upper.startswith("GLCCTA"):
-        file_type = "GLCCTA"
+    elif file_name_lower.startswith("glccta"):
+        file_type = "glccta"
         path_type = "bancs24"
 
-    elif file_name_upper.startswith("GLCCGEN"):
-        file_type = "GLCCGEN"
+    elif file_name_lower.startswith("glccgen"):
+        file_type = "glccgen"
         path_type = "bancs24"
 
     else:
         raise Exception(f"Unsupported file name: {file_name}")
 
     # ---------------------------------------------------------------
-    # paths to read
+    # landing path
     # ---------------------------------------------------------------
     path_dict = paths_for_read(path_type, etl_date, today_str)
     landing_dir = path_dict["HDFS_PATH"]
@@ -54,62 +54,73 @@ def process_single_file_dynamic(spark, file_name):
     print(f"Reading file from: {file_path}")
 
     # ---------------------------------------------------------------
-    # creating ETL folder
+    # DELTA PATH + PHYSICAL FOLDER CREATION
     # ---------------------------------------------------------------
-    target_delta_path = get_delta_path_by_file_type(file_type,etl_date)
-    # base_root = base_delta_path.rsplit("/", 1)[0]
-    # target_delta_path = f"{base_root}/{etl_date_str}/{file_type}"
+    base_delta_path = get_delta_path_by_file_type(file_type)
+
+    # create: allData/etl_date/file_type/
+    target_delta_path = f"{base_delta_path}/{etl_date_str}/{file_type}"
+
+    # ACTUAL HDFS folder creation (ONLY ONCE)
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+    path = spark._jvm.org.apache.hadoop.fs.Path(target_delta_path)
+    fs.mkdirs(path)
 
     print(f"Writing to delta path: {target_delta_path}")
 
+    # ---------------------------------------------------------------
+    # READ RAW FIXED WIDTH FILE
+    # ---------------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
-        .withColumnRenamed("value", "RAW_RECORD")
+        .withColumnRenamed("value", "raw_record")
     )
 
     # ---------------------------------------------------------------
-    # metadata from Oracle
+    # READ METADATA FROM ORACLE (using read_oracle)
     # ---------------------------------------------------------------
-    #use readwrite sql from common functions 
-    metadata_df = (
-        spark.table("FINCORE.TOTALDATAPARAMETERS")
-        .filter(F.upper(F.col("FILE_TYPE")) == file_type)
-        .filter(F.upper(F.col("TOBEINCLUDED")) == "YES")
-        .select(
-            F.upper(F.col("COLUMNNAME")).alias("COLUMNNAME"),
-            F.col("STARTVALUE"),
-            F.col("ENDVALUE"),
-            F.upper(F.col("DATA_TYPE")).alias("DATA_TYPE")
-        )
-        .orderBy("STARTVALUE")
-    )
+    metadata_query = f"""
+    (
+        SELECT
+            lower(COLUMNNAME) as columnname,
+            STARTVALUE,
+            ENDVALUE,
+            lower(DATA_TYPE) as data_type
+        FROM FINCORE.TOTALDATAPARAMETERS
+        WHERE lower(FILE_TYPE) = '{file_type}'
+        AND lower(TOBEINCLUDED) = 'yes'
+        ORDER BY STARTVALUE
+    ) temp
+    """
 
+    metadata_df = read_oracle(spark, metadata_query)
     metadata = metadata_df.collect()
 
     # ---------------------------------------------------------------
-    # parsing
+    # PARSE FIXED WIDTH
     # ---------------------------------------------------------------
     select_exprs = []
 
     for row in metadata:
-        col_name = row["COLUMNNAME"]
+        col_name = row["columnname"]
         start_pos = int(row["STARTVALUE"])
         end_pos = int(row["ENDVALUE"])
-        data_type = row["DATA_TYPE"]
+        data_type = row["data_type"]
 
         length = end_pos - start_pos + 1
-        base_col = F.substring(F.col("RAW_RECORD"), start_pos, length)
+        base_col = F.substring(F.col("raw_record"), start_pos, length)
 
-        if data_type in ("VARCHAR", "CHAR", "STRING"):
+        if data_type in ("varchar", "char", "string"):
             final_col = base_col.cast(StringType())
 
-        elif data_type in ("INT", "INTEGER"):
+        elif data_type in ("int", "integer"):
             final_col = base_col.cast(IntegerType())
 
-        elif data_type in ("LONG", "BIGINT"):
+        elif data_type in ("long", "bigint"):
             final_col = base_col.cast(LongType())
 
-        elif data_type in ("DECIMAL", "NUMBER"):
+        elif data_type in ("decimal", "number"):
             final_col = base_col.cast(DecimalType(38, 18))
 
         else:
@@ -119,14 +130,17 @@ def process_single_file_dynamic(spark, file_name):
 
     final_df = raw_df.select(*select_exprs)
 
+    # ---------------------------------------------------------------
+    # ADD METADATA COLUMNS
+    # ---------------------------------------------------------------
     final_df = (
         final_df
-        .withColumn("FILE_NAME", F.lit(file_name))
-        .withColumn("ETL_DATE", F.lit(etl_date_str))
+        .withColumn("file_name", F.lit(file_name))
+        .withColumn("etl_date", F.lit(etl_date_str))
     )
 
     # ---------------------------------------------------------------
-    # writing to delta
+    # WRITE TO DELTA
     # ---------------------------------------------------------------
     final_df.write.format("delta") \
         .mode("append") \
@@ -135,34 +149,18 @@ def process_single_file_dynamic(spark, file_name):
     print(f"{file_name} written to Delta")
 
     # ---------------------------------------------------------------
-    # reading back from delta
+    # READ BACK AND COUNT ONLY THIS FILE
     # ---------------------------------------------------------------
-    # delta_df = spark.read.format("delta").load(target_delta_path)
+    delta_df = spark.read.format("delta").load(target_delta_path)
+    delta_df.createOrReplaceTempView("temp_loaded_file")
 
-    # # filtering only this file
-    # file_loaded_df = delta_df.filter(
-    #     (F.col("FILE_NAME") == file_name) &
-    #     (F.col("ETL_DATE") == etl_date_str)
-    # )
-
-    # ---------------------------------------------------------------
-    # final count from delta
-    # ---------------------------------------------------------------
-    # record_count = file_loaded_df.count()
-    spark.read.format("delta").load(target_delta_path).createOrReplaceTempView("temp_glif")
-
-    #     # --- Method 1: TRUNCATE TABLE (Recommended for clearing data while keeping schema) ---
-    #     # This operation is atomic and fast. It removes all data files but keeps the Delta log history.
-    #     # spark.sql("TRUNCATE TABLE temp_gl_balance")
-    #     # print(f"Successfully truncated all data from the Delta Lake table.")
-
-    #     # # Verify the count
-    record_count = spark.sql("SELECT COUNT(*) FROM temp_glif where FILE_NAME='{file_name}' and ETL_DATE='{etl_date_str}'").collect()[0][0]
-    #     print(f"Row count after truncation: {count_after_truncate}")
-
+    record_count = spark.sql(f"""
+        SELECT COUNT(*)
+        FROM temp_loaded_file
+        WHERE file_name = '{file_name}'
+        AND etl_date = '{etl_date_str}'
+    """).collect()[0][0]
 
     print(f"Verified record count in delta = {record_count}")
-    return record_count 
 
-
-    
+    return record_count
