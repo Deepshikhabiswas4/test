@@ -1,25 +1,19 @@
-def get_delta_path_by_file_type(file_type):
-    """
-    Returns delta lake path based on FILE TYPE.
-    """
-
+def paths_for_read(type,date,today_str):
+    today_str=today_str
     HDFS_BASE = get_hdfs_base()
-    file_type = file_type.upper()
-
-    if file_type == "GLIF":
-        return f"{HDFS_BASE}/data-lake/allData/GLIF"
-
-    elif file_type == "INV":
-        return f"{HDFS_BASE}/data-lake/allData/INVTOGL"
-
-    elif file_type == "BOR":
-        return f"{HDFS_BASE}/data-lake/allData/BORTOGL"
-
-    elif file_type == "GLCCTA":
-        return f"{HDFS_BASE}/data-lake/allData/GLCCCTA"
-
-    elif file_type == "GLCCGEN":
-        return f"{HDFS_BASE}/data-lake/allData/GLLCGEN"
-
-    else:
-        raise Exception(f"Unsupported FILE TYPE: {file_type}")
+    if type.lower() == "glif":        
+        return{
+        "HDFS_BASE" : HDFS_BASE,
+        "HDFS_PATH" : f"{HDFS_BASE}/CBS-FILES/31-12-2025/GLIF",
+        "GL_DATALAKE_PATH" : f"{HDFS_BASE}/DATA-LAKE/GLIF",
+        "manifest_filename" : f"{type}_{today_str}_glif_balance_manifest.txt",
+        "spark_stream_path" : f"{HDFS_BASE}/DATA-LAKE/MANIFEST-FILES"
+        }
+    if type.lower() == "bancs24":
+        return{
+        "HDFS_BASE" : HDFS_BASE,
+        "HDFS_PATH" : f"{HDFS_BASE}/CBS-FILES/31-12-2025/BANCS24",
+        "CBS_BALANCE_DATALAKE_PATH" : f"{HDFS_BASE}/DATA-LAKE/BANCS24",
+        "manifest_filename" : f"{type}_{today_str}_cbs_balance_manifest.txt",
+        "spark_stream_path" : f"{HDFS_BASE}/DATA-LAKE/MANIFEST-FILES/"
+        }
