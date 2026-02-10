@@ -3,33 +3,34 @@ from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
 
 from common.fileUtil import get_delta_path_by_file_type
 from common.dateUtil import get_etl_date
-from common.pathUtil import paths_for_read
+from common.fileUtil import paths_for_read
 
 
 def process_single_file_dynamic(spark, file_name):
 
     # ---------------------------------------------------------------
-    # 0. ETL DATE
+    # ETL DATE
     # ---------------------------------------------------------------
     etl_date = get_etl_date(spark)
     etl_date_str = etl_date.strftime("%Y-%m-%d")
     today_str = etl_date.strftime("%d%m%Y")
 
     # ---------------------------------------------------------------
-    # 1. Detect FILE TYPE
+    # detecting file type
     # ---------------------------------------------------------------
     file_name_upper = file_name.upper()
-
+    file_type = ""
+    path_type = ""
     if file_name_upper.startswith("GLIF"):
         file_type = "GLIF"
         path_type = "glif"
 
     elif file_name_upper.startswith("INV"):
-        file_type = "INV"
+        file_type = "INVTOGL"
         path_type = "bancs24"
 
     elif file_name_upper.startswith("BOR"):
-        file_type = "BOR"
+        file_type = "BORTOGL"
         path_type = "bancs24"
 
     elif file_name_upper.startswith("GLCCTA"):
@@ -44,7 +45,7 @@ def process_single_file_dynamic(spark, file_name):
         raise Exception(f"Unsupported file name: {file_name}")
 
     # ---------------------------------------------------------------
-    # 2. LANDING PATH FROM COMMON FUNCTION
+    # paths to read
     # ---------------------------------------------------------------
     path_dict = paths_for_read(path_type, etl_date, today_str)
     landing_dir = path_dict["HDFS_PATH"]
@@ -53,25 +54,23 @@ def process_single_file_dynamic(spark, file_name):
     print(f"Reading file from: {file_path}")
 
     # ---------------------------------------------------------------
-    # 3. DELTA PATH + ETL DATE FOLDER
+    # creating ETL folder
     # ---------------------------------------------------------------
-    base_delta_path = get_delta_path_by_file_type(file_type)
-    base_root = base_delta_path.rsplit("/", 1)[0]
-    target_delta_path = f"{base_root}/{etl_date_str}/{file_type}"
+    target_delta_path = get_delta_path_by_file_type(file_type,etl_date)
+    # base_root = base_delta_path.rsplit("/", 1)[0]
+    # target_delta_path = f"{base_root}/{etl_date_str}/{file_type}"
 
     print(f"Writing to delta path: {target_delta_path}")
 
-    # ---------------------------------------------------------------
-    # 4. READ RAW FILE
-    # ---------------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
         .withColumnRenamed("value", "RAW_RECORD")
     )
 
     # ---------------------------------------------------------------
-    # 5. METADATA FROM ORACLE
+    # metadata from Oracle
     # ---------------------------------------------------------------
+    #use readwrite sql from common functions 
     metadata_df = (
         spark.table("FINCORE.TOTALDATAPARAMETERS")
         .filter(F.upper(F.col("FILE_TYPE")) == file_type)
@@ -88,7 +87,7 @@ def process_single_file_dynamic(spark, file_name):
     metadata = metadata_df.collect()
 
     # ---------------------------------------------------------------
-    # 6. FIXED WIDTH PARSING
+    # parsing
     # ---------------------------------------------------------------
     select_exprs = []
 
@@ -120,9 +119,6 @@ def process_single_file_dynamic(spark, file_name):
 
     final_df = raw_df.select(*select_exprs)
 
-    # ---------------------------------------------------------------
-    # 7. ADD FILE_NAME & ETL_DATE
-    # ---------------------------------------------------------------
     final_df = (
         final_df
         .withColumn("FILE_NAME", F.lit(file_name))
@@ -130,7 +126,7 @@ def process_single_file_dynamic(spark, file_name):
     )
 
     # ---------------------------------------------------------------
-    # 8. WRITE TO DELTA
+    # writing to delta
     # ---------------------------------------------------------------
     final_df.write.format("delta") \
         .mode("append") \
@@ -139,21 +135,34 @@ def process_single_file_dynamic(spark, file_name):
     print(f"{file_name} written to Delta")
 
     # ---------------------------------------------------------------
-    # 9. READ BACK FROM DELTA (SOURCE OF TRUTH) ⭐⭐⭐
+    # reading back from delta
     # ---------------------------------------------------------------
-    delta_df = spark.read.format("delta").load(target_delta_path)
+    # delta_df = spark.read.format("delta").load(target_delta_path)
 
-    # filter only this file
-    file_loaded_df = delta_df.filter(
-        (F.col("FILE_NAME") == file_name) &
-        (F.col("ETL_DATE") == etl_date_str)
-    )
+    # # filtering only this file
+    # file_loaded_df = delta_df.filter(
+    #     (F.col("FILE_NAME") == file_name) &
+    #     (F.col("ETL_DATE") == etl_date_str)
+    # )
 
     # ---------------------------------------------------------------
-    # 10. FINAL COUNT FROM DELTA
+    # final count from delta
     # ---------------------------------------------------------------
-    record_count = file_loaded_df.count()
+    # record_count = file_loaded_df.count()
+    spark.read.format("delta").load(target_delta_path).createOrReplaceTempView("temp_glif")
+
+    #     # --- Method 1: TRUNCATE TABLE (Recommended for clearing data while keeping schema) ---
+    #     # This operation is atomic and fast. It removes all data files but keeps the Delta log history.
+    #     # spark.sql("TRUNCATE TABLE temp_gl_balance")
+    #     # print(f"Successfully truncated all data from the Delta Lake table.")
+
+    #     # # Verify the count
+    record_count = spark.sql("SELECT COUNT(*) FROM temp_glif where FILE_NAME='{file_name}' and ETL_DATE='{etl_date_str}'").collect()[0][0]
+    #     print(f"Row count after truncation: {count_after_truncate}")
+
 
     print(f"Verified record count in delta = {record_count}")
+    return record_count 
 
-    return file_loaded_df, target_delta_path, record_count
+
+    
