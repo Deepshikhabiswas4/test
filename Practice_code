@@ -6,20 +6,23 @@ from pyspark.sql.types import (
     StringType
 )
 
-from common.datalake_paths import get_delta_path_by_file_type
+from common.fileUtil import get_delta_path_by_file_type
+
+HDFS_BASE = "hdfs://10.0.17.76:8020/" 
 
 
-def process_single_file_dynamic(spark, file_path, file_name):
+def process_single_file_dynamic(spark, file_name):
+    
     """
-    Reads ONE CBS / GLIF file, dynamically parses it using DB metadata,
+    Reads ONE CBS / GLIF file, dynamically parses it using Oracle table metadata,
     and returns:
-      1) final dataframe (business columns only)
+      1) final dataframe
       2) target delta lake path
       3) record count
     """
-
+ 
     # ---------------------------------------------------------------
-    # 1. Detect FILE TYPE from file name
+    # 1. Detecting FILE TYPE from file name
     # ---------------------------------------------------------------
     file_name_upper = file_name.upper()
 
@@ -42,12 +45,12 @@ def process_single_file_dynamic(spark, file_path, file_name):
         raise Exception(f"Unsupported file name: {file_name}")
 
     # ---------------------------------------------------------------
-    # 2. Resolve delta lake path (CENTRALIZED)
+    # 2. Resolving delta lake path
     # ---------------------------------------------------------------
     target_delta_path = get_delta_path_by_file_type(file_type)
 
     # ---------------------------------------------------------------
-    # 3. Read SINGLE raw file
+    # 3. Reading SINGLE raw file
     # ---------------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
@@ -55,28 +58,29 @@ def process_single_file_dynamic(spark, file_path, file_name):
     )
 
     # ---------------------------------------------------------------
-    # 4. Read metadata dynamically from DB
+    # 4. Reading metadata dynamically from Oracle
     # ---------------------------------------------------------------
-    metadata_df = (
-        spark.table("FINCORE.TOTALDATAPARAMETERS")
-        .filter(F.upper(F.col("FILE_TYPE")) == file_type)
-        .filter(F.upper(F.col("TOBEINCLUDED")) == "Y")
-        .select(
-            F.upper(F.col("COLUMNNAME")).alias("COLUMNNAME"),
-            F.col("STARTVALUE"),
-            F.col("ENDVALUE"),
-            F.upper(F.col("DATA_TYPE")).alias("DATA_TYPE")
+    try:
+        metadata_df = (
+            spark.table("FINCORE.TOTALDATAPARAMETERS")
+            .filter(F.upper(F.col("FILE_TYPE")) == file_type)
+            .filter(F.upper(F.col("TOBEINCLUDED")) == "YES")
+            .select(
+                F.upper(F.col("COLUMNNAME")).alias("COLUMNNAME"),
+                F.col("STARTVALUE"),
+                F.col("ENDVALUE"),
+                F.upper(F.col("DATA_TYPE")).alias("DATA_TYPE")
+            )
+            .orderBy("STARTVALUE")
         )
-        .orderBy("STARTVALUE")
-    )
 
-    metadata = metadata_df.collect()
+        metadata = metadata_df.collect()
 
-    if not metadata:
+    except:
         raise Exception(f"No metadata found for FILE_TYPE = {file_type}")
 
     # ---------------------------------------------------------------
-    # 5. Build substring expressions dynamically
+    # 5. Dynamic substring expressions 
     # ---------------------------------------------------------------
     select_exprs = []
 
@@ -107,14 +111,16 @@ def process_single_file_dynamic(spark, file_path, file_name):
         select_exprs.append(final_col.alias(col_name))
 
     # ---------------------------------------------------------------
-    # 6. Build FINAL dataframe (business columns only)
+    # 6. FINAL dataframe
     # ---------------------------------------------------------------
     final_df = raw_df.select(*select_exprs)
 
     # ---------------------------------------------------------------
-    # 7. Persist once → avoid double computation
+    # 7. Persist once -> avoiding double computation
     # ---------------------------------------------------------------
-    final_df = final_df.persist()
-    record_count = final_df.count()
+    
+    
+    # final_df = final_df.persist()
+    # record_count = final_df.count()
 
     return final_df, target_delta_path, record_count
