@@ -25,37 +25,54 @@ def process_single_file_dynamic(spark, file_name):
         file_type = "GLIF"
         path_type = "glif"
 
-    elif file_name_upper.startswith(("INV", "BOR", "GLCCTA", "GLCCGEN")):
-        # all others use bancs24 landing
-        if file_name_upper.startswith("INV"):
-            file_type = "INV"
-        elif file_name_upper.startswith("BOR"):
-            file_type = "BOR"
-        elif file_name_upper.startswith("GLCCTA"):
-            file_type = "GLCCTA"
-        else:
-            file_type = "GLCCGEN"
+    elif file_name_upper.startswith("INV"):
+        file_type = "INV"
+        path_type = "bancs24"
 
+    elif file_name_upper.startswith("BOR"):
+        file_type = "BOR"
+        path_type = "bancs24"
+
+    elif file_name_upper.startswith("GLCCTA"):
+        file_type = "GLCCTA"
+        path_type = "bancs24"
+
+    elif file_name_upper.startswith("GLCCGEN"):
+        file_type = "GLCCGEN"
         path_type = "bancs24"
 
     else:
         raise Exception(f"Unsupported file name: {file_name}")
 
     # ---------------------------------------------------------------
-    # 2. GET LANDING PATH FROM COMMON FUNCTION ⭐⭐⭐
+    # 2. GET LANDING DIRECTORY FROM COMMON FUNCTION
     # ---------------------------------------------------------------
     path_dict = paths_for_read(path_type, etl_date, today_str)
     landing_dir = path_dict["HDFS_PATH"]
 
+    # Full file path in HDFS
     file_path = f"{landing_dir}/{file_name}"
 
-    # ---------------------------------------------------------------
-    # 3. TARGET DELTA PATH
-    # ---------------------------------------------------------------
-    target_delta_path = get_delta_path_by_file_type(file_type)
+    print(f"Reading file from: {file_path}")
 
     # ---------------------------------------------------------------
-    # 4. CHECK IF FILE ALREADY LOADED (DELTA CHECK) ⭐⭐⭐
+    # 3. GET BASE DELTA PATH
+    # ---------------------------------------------------------------
+    base_delta_path = get_delta_path_by_file_type(file_type)
+
+    # ---------------------------------------------------------------
+    # 4. CREATE ETL DATE SUBFOLDER DYNAMICALLY ⭐⭐⭐
+    # Example:
+    # /data-lake/allData/GLIF  ->
+    # /data-lake/allData/2026-02-10/GLIF
+    # ---------------------------------------------------------------
+    base_root = base_delta_path.rsplit("/", 1)[0]
+    target_delta_path = f"{base_root}/{etl_date_str}/{file_type}"
+
+    print(f"Target delta path: {target_delta_path}")
+
+    # ---------------------------------------------------------------
+    # 5. CHECK IF FILE ALREADY LOADED (IDEMPOTENT INGESTION)
     # ---------------------------------------------------------------
     try:
         delta_tbl = DeltaTable.forPath(spark, target_delta_path)
@@ -73,10 +90,10 @@ def process_single_file_dynamic(spark, file_name):
             return None, None, 0
 
     except:
-        print(f"First load for {file_type}. Delta table will be created.")
+        print("First load for this ETL date and file type.")
 
     # ---------------------------------------------------------------
-    # 5. READ RAW FILE
+    # 6. READ RAW FIXED WIDTH FILE
     # ---------------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
@@ -84,7 +101,7 @@ def process_single_file_dynamic(spark, file_name):
     )
 
     # ---------------------------------------------------------------
-    # 6. METADATA FROM ORACLE
+    # 7. FETCH METADATA FROM ORACLE
     # ---------------------------------------------------------------
     metadata_df = (
         spark.table("FINCORE.TOTALDATAPARAMETERS")
@@ -102,7 +119,7 @@ def process_single_file_dynamic(spark, file_name):
     metadata = metadata_df.collect()
 
     # ---------------------------------------------------------------
-    # 7. FIXED WIDTH PARSING
+    # 8. DYNAMIC FIXED WIDTH PARSING
     # ---------------------------------------------------------------
     select_exprs = []
 
@@ -135,7 +152,7 @@ def process_single_file_dynamic(spark, file_name):
     final_df = raw_df.select(*select_exprs)
 
     # ---------------------------------------------------------------
-    # 8. ADD AUDIT COLUMNS ⭐⭐⭐
+    # 9. ADD AUDIT COLUMNS
     # ---------------------------------------------------------------
     final_df = (
         final_df
@@ -144,18 +161,20 @@ def process_single_file_dynamic(spark, file_name):
     )
 
     # ---------------------------------------------------------------
-    # 9. RECORD COUNT
+    # 10. RECORD COUNT
     # ---------------------------------------------------------------
     record_count = final_df.count()
-    print(f"{file_name} -> {record_count} records")
+    print(f"{file_name} record count = {record_count}")
 
     # ---------------------------------------------------------------
-    # 10. WRITE TO DELTA
+    # 11. WRITE TO DELTA LAKE
     # ---------------------------------------------------------------
+    final_df = final_df.repartition(1)
+
     final_df.write.format("delta") \
         .mode("append") \
         .save(target_delta_path)
 
-    print(f"{file_name} loaded into {target_delta_path}")
+    print(f"{file_name} successfully loaded into {target_delta_path}")
 
     return final_df, target_delta_path, record_count
