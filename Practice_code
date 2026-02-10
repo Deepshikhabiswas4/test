@@ -1,126 +1,25 @@
-from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DecimalType,
-    IntegerType,
-    LongType,
-    StringType
-)
-
-from common.fileUtil import get_delta_path_by_file_type
-
-HDFS_BASE = "hdfs://10.0.17.76:8020/" 
-
-
-def process_single_file_dynamic(spark, file_name):
-    
+def get_delta_path_by_file_type(file_type):
     """
-    Reads ONE CBS / GLIF file, dynamically parses it using Oracle table metadata,
-    and returns:
-      1) final dataframe
-      2) target delta lake path
-      3) record count
+    Returns delta lake path based on FILE TYPE.
     """
- 
-    # ---------------------------------------------------------------
-    # 1. Detecting FILE TYPE from file name
-    # ---------------------------------------------------------------
-    file_name_upper = file_name.upper()
 
-    if file_name_upper.startswith("GLIF"):
-        file_type = "GLIF"
+    HDFS_BASE = get_hdfs_base()
+    file_type = file_type.upper()
 
-    elif file_name_upper.startswith("INV"):
-        file_type = "INV"
+    if file_type == "GLIF":
+        return f"{HDFS_BASE}/data-lake/allData/GLIF"
 
-    elif file_name_upper.startswith("BOR"):
-        file_type = "BOR"
+    elif file_type == "INV":
+        return f"{HDFS_BASE}/data-lake/allData/INVTOGL"
 
-    elif file_name_upper.startswith("GLCCTA"):
-        file_type = "GLCCTA"
+    elif file_type == "BOR":
+        return f"{HDFS_BASE}/data-lake/allData/BORTOGL"
 
-    elif file_name_upper.startswith("GLCCGEN"):
-        file_type = "GLCCGEN"
+    elif file_type == "GLCCTA":
+        return f"{HDFS_BASE}/data-lake/allData/GLCCCTA"
+
+    elif file_type == "GLCCGEN":
+        return f"{HDFS_BASE}/data-lake/allData/GLLCGEN"
 
     else:
-        raise Exception(f"Unsupported file name: {file_name}")
-
-    # ---------------------------------------------------------------
-    # 2. Resolving delta lake path
-    # ---------------------------------------------------------------
-    target_delta_path = get_delta_path_by_file_type(file_type)
-
-    # ---------------------------------------------------------------
-    # 3. Reading SINGLE raw file
-    # ---------------------------------------------------------------
-    raw_df = (
-        spark.read.text(file_path)
-        .withColumnRenamed("value", "RAW_RECORD")
-    )
-
-    # ---------------------------------------------------------------
-    # 4. Reading metadata dynamically from Oracle
-    # ---------------------------------------------------------------
-    try:
-        metadata_df = (
-            spark.table("FINCORE.TOTALDATAPARAMETERS")
-            .filter(F.upper(F.col("FILE_TYPE")) == file_type)
-            .filter(F.upper(F.col("TOBEINCLUDED")) == "YES")
-            .select(
-                F.upper(F.col("COLUMNNAME")).alias("COLUMNNAME"),
-                F.col("STARTVALUE"),
-                F.col("ENDVALUE"),
-                F.upper(F.col("DATA_TYPE")).alias("DATA_TYPE")
-            )
-            .orderBy("STARTVALUE")
-        )
-
-        metadata = metadata_df.collect()
-
-    except:
-        raise Exception(f"No metadata found for FILE_TYPE = {file_type}")
-
-    # ---------------------------------------------------------------
-    # 5. Dynamic substring expressions 
-    # ---------------------------------------------------------------
-    select_exprs = []
-
-    for row in metadata:
-        col_name = row["COLUMNNAME"]
-        start_pos = int(row["STARTVALUE"])
-        end_pos = int(row["ENDVALUE"])
-        data_type = row["DATA_TYPE"]
-
-        length = end_pos - start_pos + 1
-        base_col = F.substring(F.col("RAW_RECORD"), start_pos, length)
-
-        if data_type in ("VARCHAR", "CHAR", "STRING"):
-            final_col = base_col.cast(StringType())
-
-        elif data_type in ("INT", "INTEGER"):
-            final_col = base_col.cast(IntegerType())
-
-        elif data_type in ("LONG", "BIGINT"):
-            final_col = base_col.cast(LongType())
-
-        elif data_type in ("DECIMAL", "NUMBER"):
-            final_col = base_col.cast(DecimalType(38, 18))
-
-        else:
-            raise Exception(f"Unsupported DATA_TYPE: {data_type}")
-
-        select_exprs.append(final_col.alias(col_name))
-
-    # ---------------------------------------------------------------
-    # 6. FINAL dataframe
-    # ---------------------------------------------------------------
-    final_df = raw_df.select(*select_exprs)
-
-    # ---------------------------------------------------------------
-    # 7. Persist once -> avoiding double computation
-    # ---------------------------------------------------------------
-    
-    
-    # final_df = final_df.persist()
-    # record_count = final_df.count()
-
-    return final_df, target_delta_path, record_count
+        raise Exception(f"Unsupported FILE TYPE: {file_type}")
