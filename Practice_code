@@ -1,24 +1,189 @@
+    
+import os
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
+
+# from common.fileUtil import paths_for_read
+from common.dateUtil import get_etl_date
+from common.datalake_paths import get_delta_path_by_file_type
+from common.read_write_oracle import read_oracle
+from common.fileUtil import get_hdfs_base
+from common.createSpark import create_spark_session
+
+HDFS_BASE = get_hdfs_base()
+spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
+
+def process_single_file_dynamic(spark):
+# put file_name as parameter with spark
+    # ---------------------------------------------------------------
+    # ETL DATE
+    # ---------------------------------------------------------------
+    etl_date = get_etl_date(spark)
+    etl_date_str = etl_date.strftime("%Y-%m-%d")
+    today_str = etl_date.strftime("%d%m%Y")
+    file_path =  f"{HDFS_BASE}/CBS-FILES/GLIF/AMARAVATHI__GLIFBOR_584.gz"
+    file_name = os.path.basename(file_path)
+    # ---------------------------------------------------------------
+    # detecting file type 
+    # ---------------------------------------------------------------
+    file_name_lower = file_name.lower()
+
+    # if file_name_lower.startswith("glif"):
+    #     file_type = "glif"
+    #     # path_type = "glif"
+    if "glif" in file_name_lower:
+        file_type = "glif"
+
+    elif file_name_lower.startswith("inv"):
+        file_type = "invtogl"
+        path_type = "bancs24"
+
+    elif file_name_lower.startswith("bor"):
+        file_type = "bortogl"
+        path_type = "bancs24"
+
+    elif file_name_lower.startswith("glccta"):
+        file_type = "glccta"
+        path_type = "bancs24"
+
+    elif file_name_lower.startswith("glccgen"):
+        file_type = "glccgen"
+        path_type = "bancs24"
+
+    else:
+        raise Exception(f"Unsupported file name: {file_name}")
+
+    # ---------------------------------------------------------------
+    # landing path
+    # # ---------------------------------------------------------------
+    # path_dict = paths_for_read(path_type, etl_date, today_str)
+    # landing_dir = path_dict["HDFS_PATH"]
+    # file_path = f"{landing_dir}/{file_name}"
+
+    # print(f"Reading file from: {file_path}")
+   
+    # ---------------------------------------------------------------
+    # physical folder creation
+    # ---------------------------------------------------------------
+    base_delta_path = get_delta_path_by_file_type(etl_date_str, file_type)
+    target_delta_path = f"{base_delta_path}/{file_type}"
+
+    # creating hdfs folder just once
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+    path = spark._jvm.org.apache.hadoop.fs.Path(target_delta_path)
+    fs.mkdirs(path)
+
+    print(f"Writing to delta path: {target_delta_path}")
+
+    # ---------------------------------------------------------------
+    # READING RAW FIXED WIDTH FILE
+    # ---------------------------------------------------------------
+    raw_df = (
+        spark.read.text(file_path)
+        .withColumnRenamed("value", "raw_record")
+    )
+
+    # ---------------------------------------------------------------
+    # reading metadata from Oracle
+    # ---------------------------------------------------------------
+    metadata_query = f"""
+    (
+        SELECT
+            lower(COLUMNNAME) as columnname,
+            STARTVALUE,
+            ENDVALUE,
+            lower(DATA_TYPE) as data_type
+        FROM FINCORE.TOTALDATAPARAMETERS
+        WHERE lower(FILE_TYPE) = '{file_type}'
+        AND lower(TOBEINCLUDED) = 'yes'
+        ORDER BY STARTVALUE
+    ) temp
+    """
+
+    metadata_df = read_oracle(spark, metadata_query)
+    metadata = metadata_df.collect()
+
+    # ---------------------------------------------------------------
+    # parsing
+    # ---------------------------------------------------------------
+    select_exprs = []
+
+    for row in metadata:
+        col_name = row["columnname"]
+        start_pos = int(row["STARTVALUE"])
+        end_pos = int(row["ENDVALUE"])
+        data_type = row["data_type"]
+
+        length = end_pos - start_pos + 1
+        base_col = F.substring(F.col("raw_record"), start_pos, length)
+
+        if data_type in ("varchar", "char", "string"):
+            final_col = base_col.cast(StringType())
+
+        elif data_type in ("int", "integer"):
+            final_col = base_col.cast(IntegerType())
+
+        elif data_type in ("long", "bigint"):
+            final_col = base_col.cast(LongType())
+
+        elif data_type in ("decimal", "number"):
+            final_col = base_col.cast(DecimalType(38, 18))
+
+        else:
+            raise Exception(f"Unsupported DATA_TYPE: {data_type}")
+
+        select_exprs.append(final_col.alias(col_name))
+
+    final_df = raw_df.select(*select_exprs)
+
+    final_df = (
+        final_df
+        .withColumn("file_name", F.lit(file_name))
+    )
+
+    # ---------------------------------------------------------------
+    # writing into delta
+    # ---------------------------------------------------------------
+    final_df.write.format("delta") \
+        .mode("append") \
+        .save(target_delta_path)
+
+    print(f"{file_name} written to Delta")
+
+    # ---------------------------------------------------------------
+    # reading back from delta
+    # ---------------------------------------------------------------
+    delta_df = spark.read.format("delta").load(target_delta_path)
+    delta_df.createOrReplaceTempView("temp_loaded_file")
+
+    record_count = spark.sql(f"""
+        SELECT COUNT(*)
+        FROM temp_loaded_file
+        WHERE file_name = '{file_name}'
+        AND etl_date = '{etl_date_str}'
+    """).collect()[0][0]
+
+    print(f"Verified record count in delta = {record_count}")
+
+    return record_count
+
 
 
 def main():
 
-    # ---------------------------------
-    # create spark
-    # ---------------------------------
-    spark = (
-        SparkSession.builder
-        .appName("glif-test-loader")
-        .enableHiveSupport()
-        .getOrCreate()
-    )
+    # spark = (
+    #     SparkSession.builder
+    #     .appName("glif-test-loader")
+    #     .enableHiveSupport()
+    #     .getOrCreate()
+    # )
+    # spark.config("spark.hadoop.fs.defaultFS", "hdfs://10.0.17.76:8020")
 
     spark.sparkContext.setLogLevel("ERROR")
-
-    # ---------------------------------
-    # HARD CODED FILE NAME (change here only)
-    # ---------------------------------
-    file_name = "GLIF_31122025.txt"
+   
+    file_name = "GLIF_AMARAVATHI__GLIFBOR.gz"
 
     print("====================================")
     print(f"Starting test load for : {file_name}")
@@ -39,9 +204,5 @@ def main():
     finally:
         spark.stop()
 
-
-# ----------------------------
-# program entry
-# ----------------------------
 if __name__ == "__main__":
     main()
