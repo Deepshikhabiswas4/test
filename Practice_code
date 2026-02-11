@@ -1,84 +1,98 @@
-    
 import os
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
 
-# from common.fileUtil import paths_for_read
 from common.dateUtil import get_etl_date
 from common.datalake_paths import get_delta_path_by_file_type
 from common.read_write_oracle import read_oracle
 from common.fileUtil import get_hdfs_base
 from common.createSpark import create_spark_session
 
+
+# ---------------------------------------------------------------
+# SPARK SESSION (UNCHANGED — as you wrote)
+# ---------------------------------------------------------------
 HDFS_BASE = get_hdfs_base()
 spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
 
+
+# ---------------------------------------------------------------
+# MAIN PROCESS
+# ---------------------------------------------------------------
 def process_single_file_dynamic(spark):
-# put file_name as parameter with spark
+
     # ---------------------------------------------------------------
     # ETL DATE
     # ---------------------------------------------------------------
     etl_date = get_etl_date(spark)
     etl_date_str = etl_date.strftime("%Y-%m-%d")
-    today_str = etl_date.strftime("%d%m%Y")
-    file_path =  f"{HDFS_BASE}/CBS-FILES/GLIF/AMARAVATHI__GLIFBOR_584.gz"
-    file_name = os.path.basename(file_path)
+
     # ---------------------------------------------------------------
-    # detecting file type 
+    # HARD CODED TEST FILE
+    # (local testing instead of other HDFS server)
+    # ---------------------------------------------------------------
+    file_path = f"{HDFS_BASE}/CBS-FILES/GLIF/AMARAVATHI__GLIFBOR_584.gz"
+    file_name = os.path.basename(file_path)
+
+    print(f"Reading file : {file_name}")
+
+    # ---------------------------------------------------------------
+    # FILE TYPE DETECTION
     # ---------------------------------------------------------------
     file_name_lower = file_name.lower()
 
-    # if file_name_lower.startswith("glif"):
-    #     file_type = "glif"
-    #     # path_type = "glif"
     if "glif" in file_name_lower:
         file_type = "glif"
-
     elif file_name_lower.startswith("inv"):
         file_type = "invtogl"
-        path_type = "bancs24"
-
     elif file_name_lower.startswith("bor"):
         file_type = "bortogl"
-        path_type = "bancs24"
-
     elif file_name_lower.startswith("glccta"):
         file_type = "glccta"
-        path_type = "bancs24"
-
     elif file_name_lower.startswith("glccgen"):
         file_type = "glccgen"
-        path_type = "bancs24"
-
     else:
         raise Exception(f"Unsupported file name: {file_name}")
 
-    # ---------------------------------------------------------------
-    # landing path
-    # # ---------------------------------------------------------------
-    # path_dict = paths_for_read(path_type, etl_date, today_str)
-    # landing_dir = path_dict["HDFS_PATH"]
-    # file_path = f"{landing_dir}/{file_name}"
+    print(f"Detected file type : {file_type}")
 
-    # print(f"Reading file from: {file_path}")
-   
     # ---------------------------------------------------------------
-    # physical folder creation
+    # DELTA BASE PATH
     # ---------------------------------------------------------------
-    base_delta_path = get_delta_path_by_file_type(etl_date_str, file_type)
-    target_delta_path = f"{base_delta_path}/{file_type}"
+    base_delta_path = get_delta_path_by_file_type(file_type, etl_date)
 
-    # creating hdfs folder just once
+    # final structure:
+    # allData/<etl_date>/<file_type>/
+    etl_folder = f"{base_delta_path}/{etl_date_str}"
+    target_delta_path = f"{etl_folder}/{file_type}"
+
+    # ---------------------------------------------------------------
+    # CREATE FOLDER ONLY ONCE
+    # ---------------------------------------------------------------
     hadoop_conf = spark._jsc.hadoopConfiguration()
     fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
-    path = spark._jvm.org.apache.hadoop.fs.Path(target_delta_path)
-    fs.mkdirs(path)
 
-    print(f"Writing to delta path: {target_delta_path}")
+    Path = spark._jvm.org.apache.hadoop.fs.Path
+
+    etl_path_obj = Path(etl_folder)
+    filetype_path_obj = Path(target_delta_path)
+
+    # create ETL folder
+    if not fs.exists(etl_path_obj):
+        fs.mkdirs(etl_path_obj)
+        print(f"Created ETL folder: {etl_folder}")
+    else:
+        print(f"ETL folder already exists: {etl_folder}")
+
+    # create file type folder
+    if not fs.exists(filetype_path_obj):
+        fs.mkdirs(filetype_path_obj)
+        print(f"Created file type folder: {target_delta_path}")
+    else:
+        print(f"File type folder already exists: {target_delta_path}")
 
     # ---------------------------------------------------------------
-    # READING RAW FIXED WIDTH FILE
+    # READ FIXED WIDTH FILE
     # ---------------------------------------------------------------
     raw_df = (
         spark.read.text(file_path)
@@ -86,19 +100,19 @@ def process_single_file_dynamic(spark):
     )
 
     # ---------------------------------------------------------------
-    # reading metadata from Oracle
+    # READ METADATA FROM ORACLE (LOWER CASE)
     # ---------------------------------------------------------------
     metadata_query = f"""
     (
         SELECT
-            lower(COLUMNNAME) as columnname,
-            STARTVALUE,
-            ENDVALUE,
-            lower(DATA_TYPE) as data_type
+            lower(columnname) as columnname,
+            startvalue,
+            endvalue,
+            lower(data_type) as data_type
         FROM FINCORE.TOTALDATAPARAMETERS
-        WHERE lower(FILE_TYPE) = '{file_type}'
-        AND lower(TOBEINCLUDED) = 'yes'
-        ORDER BY STARTVALUE
+        WHERE lower(file_type) = '{file_type}'
+        AND lower(tobeincluded) = 'yes'
+        ORDER BY startvalue
     ) temp
     """
 
@@ -106,14 +120,14 @@ def process_single_file_dynamic(spark):
     metadata = metadata_df.collect()
 
     # ---------------------------------------------------------------
-    # parsing
+    # PARSING FIXED WIDTH
     # ---------------------------------------------------------------
     select_exprs = []
 
     for row in metadata:
         col_name = row["columnname"]
-        start_pos = int(row["STARTVALUE"])
-        end_pos = int(row["ENDVALUE"])
+        start_pos = int(row["startvalue"])
+        end_pos = int(row["endvalue"])
         data_type = row["data_type"]
 
         length = end_pos - start_pos + 1
@@ -138,13 +152,15 @@ def process_single_file_dynamic(spark):
 
     final_df = raw_df.select(*select_exprs)
 
+    # add metadata columns
     final_df = (
         final_df
         .withColumn("file_name", F.lit(file_name))
+        .withColumn("etl_date", F.lit(etl_date_str))
     )
 
     # ---------------------------------------------------------------
-    # writing into delta
+    # WRITE TO DELTA
     # ---------------------------------------------------------------
     final_df.write.format("delta") \
         .mode("append") \
@@ -153,7 +169,7 @@ def process_single_file_dynamic(spark):
     print(f"{file_name} written to Delta")
 
     # ---------------------------------------------------------------
-    # reading back from delta
+    # VERIFY RECORD COUNT (FROM DELTA)
     # ---------------------------------------------------------------
     delta_df = spark.read.format("delta").load(target_delta_path)
     delta_df.createOrReplaceTempView("temp_loaded_file")
@@ -170,27 +186,18 @@ def process_single_file_dynamic(spark):
     return record_count
 
 
-
+# ---------------------------------------------------------------
+# MAIN (FOR TESTING)
+# ---------------------------------------------------------------
 def main():
-
-    # spark = (
-    #     SparkSession.builder
-    #     .appName("glif-test-loader")
-    #     .enableHiveSupport()
-    #     .getOrCreate()
-    # )
-    # spark.config("spark.hadoop.fs.defaultFS", "hdfs://10.0.17.76:8020")
-
     spark.sparkContext.setLogLevel("ERROR")
-   
-    file_name = "GLIF_AMARAVATHI__GLIFBOR.gz"
 
     print("====================================")
-    print(f"Starting test load for : {file_name}")
+    print("Starting GLIF test load")
     print("====================================")
 
     try:
-        record_count = process_single_file_dynamic(spark, file_name)
+        record_count = process_single_file_dynamic(spark)
 
         print("====================================")
         print(f"Loaded records : {record_count}")
@@ -203,6 +210,7 @@ def main():
 
     finally:
         spark.stop()
+
 
 if __name__ == "__main__":
     main()
