@@ -12,3 +12,11 @@ except Exception as e:
     logger.error(f"Unable to read GLIF transactions from datalake: {e}")
     spark.stop()
     exit()
+
+
+df_agg = df_with_signed_amount.groupBy("Id","currency_code").agg(
+    F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
+    F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
+    F.sum(F.abs(col("Amount_final"))).alias("FOREIGN_CURRENCY_AMOUNT"),
+    F.count(F.col("Id")).alias("TRANSACTION_COUNT")
+)
