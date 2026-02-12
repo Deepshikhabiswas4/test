@@ -1,711 +1,582 @@
-import datetime 
-from pyspark.sql import SparkSession , functions as F
-import pyspark.sql.types as T
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
-from pyspark.sql.functions import to_date,expr, round, col,when, length, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType, TimestampType
-from datetime import date, timedelta
-from pyspark.sql.functions import desc
-import sys
-from py4j.java_gateway import java_import
-import concurrent.futures
-import builtins
-from pyspark.sql import Row
-import re
-# =========== Common Methods =============================
-from common.logger import setup_logger 
-from common.properties import get_oracle_properties
+import os
+from pyspark.sql import functions as F
+from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
+
 from common.dateUtil import get_etl_date
-from common.fileUtil import files_to_read
-from common.fileUtil import paths_for_read
-from common.fileUtil import tables_to_read
-from common.processRun import get_run_id
-from common.pattern import read_patterns
-from common.createSpark import create_spark_session
-from common.fileUtil import get_hdfs_base
-from common.check_monthend import check_MonthEnd
-from common.check_monthend import check_MonthEnd_minus1
-from common.check_monthend import check_Previous_MonthEnd
-from common.batch_journal_id import get_batch_id
-from common.batch_journal_id import get_journal_id
-
-from common.Precheck import run_currency_precheck
-from datetime import datetime,date
-from common.logdb import log_etl
-from common.PPF_FCNB import ppf_postings
-from common.PPF_FCNB import monthend_posting
+from common.fileUtil import get_delta_path_by_file_type
 from common.read_write_oracle import read_oracle
-from common.read_write_oracle import write_oracle
-from common.provision import process_provision_data
-from common.provision import reverse_provision
+from common.fileUtil import get_hdfs_base
+from common.createSpark import create_spark_session
 
+
+# ---------------------------------------------------------------
+# SPARK SESSION 
+# ---------------------------------------------------------------
 HDFS_BASE = get_hdfs_base()
 spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
-today = get_etl_date(spark)
-yesterday = today - timedelta(days=1)
-posting_date_str = today.strftime("%Y-%m-%d")
-today_str = posting_date_str
-yesterday=yesterday.strftime("%Y-%m-%d")
-today= today.strftime("%Y-%m-%d")
-RUN_ID = get_run_id( spark,posting_date_str,"GLIF") 
-logger = setup_logger("GLIF", RUN_ID , posting_date_str)
-today1 = date.today()   
-logger.info(f"=== Using current date for POST_DATE: {posting_date_str} ===")
-logger.info(f"RUN_ID as : {RUN_ID}")
 
-logger.info(f"Fetched oracle properties SUCCESFULLY :)")
-oracle_properties=get_oracle_properties()
-logger.info(oracle_properties)
+def process_single_file_dynamic(spark):
 
-oracle_url = oracle_properties["url"]
-oracle_user = oracle_properties["user"]
-oracle_password = oracle_properties["password"]
-oracle_driver = oracle_properties["driver"]
-DriverManager = spark._jvm.java.sql.DriverManager
-startTime= datetime.now()
- 
+    # ---------------------------------------------------------------
+    # ETL DATE
+    # ---------------------------------------------------------------
+    etl_date = get_etl_date(spark)
+    etl_date_str = etl_date.strftime("%Y-%m-%d")
 
-log_etl(spark,"GLIF",RUN_ID , "GLIF ETL PRCOESS STARTED",5,1,startTime)
+    file_path =  f"{HDFS_BASE}/data-lake/allData/CBS-FILES/GLIF"
+    file_name = os.path.basename(file_path)
 
-fncb_cgl_query="(SELECT FROM_CGL,TO_CGL,CGL_TYPE FROM FCNB_CGL) T1" 
+    print(f"Reading file : {file_name}")
 
-fcnb_cgl_df = read_oracle(spark, fncb_cgl_query)
+    # ---------------------------------------------------------------
+    # FILE TYPE DETECTION
+    # ---------------------------------------------------------------
+    file_name_lower = file_name.lower()
+    file_type=""
+    if "glif" in file_name_lower:
+        file_type = "glif"
+    elif file_name_lower.startswith("inv"):
+        file_type = "invtogl"
+    elif file_name_lower.startswith("bor"):
+        file_type = "bortogl"
+    elif file_name_lower.startswith("glccta"):
+        file_type = "glccta"
+    elif file_name_lower.startswith("glccgen"):
+        file_type = "glccgen"
+    else:
+        raise Exception(f"Unsupported file name: {file_name}")
 
-fcnb_currency_query="(SELECT CURRENCY_CODE,DEPOSIT_EXPENSE_FLAG,LOAN_INCOME_FLAG FROM FCNB_CURRENCY_CONFIG) T1"
+    print(f"Detected file type : {file_type}")
 
-fcnb_currency = read_oracle(spark,fcnb_currency_query)
+    # ---------------------------------------------------------------
+    # DELTA BASE PATH
+    # ---------------------------------------------------------------
+    base_delta_path = get_delta_path_by_file_type(file_type, etl_date_str)
 
+    # final structure:
+    # allData/<etl_date>/<file_type>/
+    etl_folder = f"{base_delta_path}"
+    target_delta_path = f"{etl_folder}/{file_type}"
 
+    # ---------------------------------------------------------------
+    # FOLDER ONLY ONCE
+    # ---------------------------------------------------------------
+    hadoop_conf = spark._jsc.hadoopConfiguration()
+    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
 
+    Path = spark._jvm.org.apache.hadoop.fs.Path
 
-batch_id_schema = StructType([
-    StructField("BATCH_ID_VAL", LongType(), False) 
-])
+    etl_path_obj = Path(etl_folder)
+    filetype_path_obj = Path(target_delta_path)
 
-BATCH_ID_LITERAL = None
-try:
-    BATCH_ID_LITERAL = get_batch_id(spark)
-except Exception as e:
-     print(f"Error fetching BATCH_SEQ via JDBC in gl : {e}")
-     spark.stop()
-     exit()
+    # creating ETL folder
+    if not fs.exists(etl_path_obj):
+        fs.mkdirs(etl_path_obj)
+        print(f"Created ETL folder: {etl_folder}")
+    else:
+        print(f"ETL folder already exists: {etl_folder}")
 
-
-sc = spark.sparkContext
-# 1. Setup Hadoop FileSystem Access
-jvm = sc._jvm
-jsc = sc._jsc
-fs = jvm.org.apache.hadoop.fs.FileSystem.get(jsc.hadoopConfiguration())
-Path = jvm.org.apache.hadoop.fs.Path
-
-
-hdfs_paths = paths_for_read("glif",today,today_str)
-
-HDFS_BASE = hdfs_paths["HDFS_BASE"]
-HDFS_PATH = hdfs_paths["HDFS_PATH"]
-GL_DATALAKE_PATH = hdfs_paths["GL_DATALAKE_PATH"]
-manifest_filename = hdfs_paths["manifest_filename"]
-spark_stream_path = hdfs_paths["spark_stream_path"] + manifest_filename
-
-oracle_tables = tables_to_read("glif")
-
-
-try:
-    log_etl(spark,"GLIF",RUN_ID , "File Reading Started",8,1,startTime)
-    files = files_to_read(spark,"glif")
-    logger.info(files)
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR READING FILES : 202 : 388",8,3,startTime)
-    spark.stop()
-    exit()
-
-file_types_with_extra = files["stream_files"]
-file_types_without_extra = files["non_stream_files"]
-
-paths_to_read = [f"{HDFS_PATH}/{ft}_31122025_*_[0-9][0-9][0-9].gz" for ft in file_types_with_extra]
-paths_to_read.extend([f"{HDFS_PATH}/{ft}_31122025_*[!0-9].gz" for ft in file_types_without_extra])
+    # creating file type folder
+    # if not fs.exists(filetype_path_obj):
+    #     fs.mkdirs(filetype_path_obj)
+    #     print(f"Created file type folder: {target_delta_path}")
+    # else:
+    #     print(f"File type folder already exists: {target_delta_path}")
 
 
-TRANSACTIONS = oracle_tables["TRANSACTIONS"]
-BALANCE = oracle_tables["BALANCE"]
-INVALID = oracle_tables["INVALID"]
-CGLS = oracle_tables["CGLS"]
-CURRENCY = oracle_tables["CURRENCY"]
-BRANCH = oracle_tables["BRANCH"]
-
-logger.info(f"ETL date : {today}")
-logger.info(f"Oracle properties fetched successfully")
-
-
-
-try:
-    # df_raw = read_patterns(spark,paths_to_read,posting_date_str,RUN_ID)
-    df_raw=spark.read.text("hdfs://10.0.17.76:8020/Glif_Data.txt")
-    log_etl(spark,"GLIF",RUN_ID , "File Reading Completed",9,2,startTime)
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR READING FILES : 203 : 411",8,3,startTime)
-    spark.stop()
-    exit()
-
-
-logger.info(f"Reading Patterns")
-log_etl(spark,"GLIF",RUN_ID , "Analytics Started",10,1,startTime)
-df_processed = df_raw.withColumns({
-    "Id": expr("substring(value, 51, 18)"),
-    "currency_code": expr("substring(value, 48, 3)")
-})
-df_clean = df_processed.withColumns({
-    "Amount_raw": when(col("currency_code") != "INR", expr("substring(value, 133, 17)"))
-                 .otherwise(expr("substring(value, 116, 17)")),
-    "last_char": when(col("currency_code") != "INR", expr("substring(value, 149, 1)"))
-                 .otherwise(expr("substring(value, 132, 1)"))
-}).drop("value", "currency_code")
-
-df_clean = df_clean.withColumns({
-    "Amount_base": substring(col("Amount_raw"), 1, 16),
-    "sign_char": substring(col("Amount_raw"), 17, 1)
-})
-
-digit_map = create_map(
-    lit('1'), lit('1'), lit('2'), lit('2'), lit('3'), lit('3'), lit('4'), lit('4'), lit('5'), lit('5'),
-    lit('6'), lit('6'), lit('7'), lit('7'), lit('8'), lit('8'), lit('9'), lit('9'), lit('0'), lit('0'),
-    lit('p'), lit('0'), lit('q'), lit('1'), lit('r'), lit('2'), lit('s'), lit('3'), lit('t'), lit('4'),
-    lit('u'), lit('5'), lit('v'), lit('6'), lit('w'), lit('7'), lit('x'), lit('8'), lit('y'), lit('9')
-)
-
-df_with_signed_amount = df_clean.withColumns({
-    "last_digit": digit_map.getItem(col("sign_char")),
-    "sign": when(col("sign_char").isin(['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y']), -1).otherwise(1)
-})
-df_with_signed_amount = df_with_signed_amount.withColumn(
-    "Amount_decimal_str",
-    concat(col("Amount_base"), col("last_digit"))
-)
-df_final = df_with_signed_amount.withColumns({
-    "Amount_final": (col("Amount_decimal_str").cast(DecimalType(25,4)) / 1000) * col("sign")
-})
-df_with_signed_amount = df_final.withColumns({
-    "Amountpve": when(df_final["Amount_final"] > 0, df_final["Amount_final"]).otherwise(0),
-    "Amountnve": when(df_final["Amount_final"] < 0, df_final["Amount_final"]).otherwise(0)
-})
-
-try:
-    df_agg = df_with_signed_amount.groupBy("Id").agg(
-        F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
-        F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
-        F.count(F.col("Id")).alias("TRANSACTION_COUNT")
+    raw_df = (
+        spark.read.text(file_path)
+        .withColumnRenamed("value", "raw_record")
     )
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in grpby  : 204 : 464",10,3,startTime)
-    spark.stop()
-    exit() 
 
-df_mapped = df_agg.withColumns({ 
-    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()),
-    "JOURNAL_ID": lit(None).cast(StringType()),
-    "BRANCH_CODE": substring(col("Id"), 1, 5),
-    "CURRENCY": substring(col("Id"), 6, 3),
-    "CGL": substring(col("Id"), 9, 10),
-    "NARRATION": lit("CBS consolidated txns").cast(StringType()),
-    "SOURCE_FLAG": lit("C").cast(StringType())
-})
-
-df_final_schema = df_mapped.select(
-    "BATCH_ID",
-    "JOURNAL_ID",
-    "BRANCH_CODE",
-    "CURRENCY",
-    "CGL",
-    "NARRATION",
-    "DEBIT_AMOUNT",
-    "CREDIT_AMOUNT",
-    "TRANSACTION_COUNT",
-    "SOURCE_FLAG"
-)
-logger.info(f"Raw Data Got Filtered")
-res=check_MonthEnd_minus1()
-logger.info(f"Monthend-1:{res}")
-if(check_MonthEnd_minus1()):
-    try:
-        logger.info("Reverse Provision Start")
-        final_df = reverse_provision(TRANSACTIONS,BATCH_ID_LITERAL).withColumn("TRANSACTION_DATE",F.to_date(F.lit(posting_date_str)))
-       
-        try:
-            write_oracle(final_df,TRANSACTIONS)
-        except Exception as e:
-            print(f"Error {e} while writing into GL_TRANSACTIONS")
-
-        final_df = final_df.select( col("BRANCH_CODE"),
-                col("CURRENCY"),
-                col("CGL"),F.col("CREDIT_AMOUNT") + F.col("DEBIT_AMOUNT").alias("BALANCE")).withColumn("BALANCE_DATE",F.lit(posting_date_str))  
-        try:
-            write_oracle(final_df,BALANCE)
-        except Exception as e:
-            print(f"Error {e} while writing to Balance Table")  
-    except Exception as e:
-        print(f"Error {e} while loading or writing of reversed provision transactions")
-
-if(check_MonthEnd()):
-    provision_df = process_provision_data(BATCH_ID_LITERAL)
-    df_final_schema = df_final_schema.unionByName(provision_df)
-    
-df_final_schema.cache()
-
-# ===================================================================================
-                #    || BRANCH CODE ||
-# ===================================================================================
-
-try:
-    branch_query = f"""
+    # ---------------------------------------------------------------
+    # READING METADATA FROM ORACLE 
+    # ---------------------------------------------------------------
+    metadata_query = f"""
     (
-        SELECT code FROM {BRANCH} 
-    ) T1
+        SELECT
+            COLUMNNAME as columnname,
+            STARTVALUE,
+            ENDVALUE,
+            lower(DATA_TYPE) as data_type
+        FROM FINCORE.TOTALDATAPARAMETERS
+        WHERE lower(FILE_TYPE) = '{file_type}'
+        AND lower(TOBEINCLUDED) = 'yes'
+        ORDER BY STARTVALUE
+    ) temp
     """
-    branch_list = spark.read.format("jdbc") \
-        .option("url", oracle_url) \
-        .option("dbtable", branch_query) \
-        .option("user", oracle_user) \
-        .option("password", oracle_password) \
-        .option("driver", oracle_driver) \
-        .load()
-    logger.info(f"Branch list loaded successfully")
-except Exception as e:
-    logger.error(f"Error {e} while fetching the branchlist from oracle.")
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in datafetching  : 205 : 513",10,3,startTime)
-    spark.stop()
-    exit()
-try:    
-    df_validated_branch = df_final_schema.join(
-        broadcast(branch_list.select(col("CODE").alias("BRANCH_CODE")).withColumn("IS_VALID_BRANCH", lit(1))),
-        on="BRANCH_CODE",
-        how="left"
-    )
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 206 : 523",10,3,startTime)
-    spark.stop()
-    exit()
 
-df_invalid_branches = df_validated_branch.filter(col("IS_VALID_BRANCH").isNull()).withColumn("REASON",lit("INVALID BRANCH")).select(
-"BRANCH_CODE",
-"BATCH_ID",
-"CURRENCY",
-"CGL",
-"NARRATION",
-"DEBIT_AMOUNT",
-"CREDIT_AMOUNT",
-"TRANSACTION_COUNT",
-"SOURCE_FLAG",
-"REASON"    
-)
+    metadata_df = read_oracle(spark, metadata_query)
+    metadata = metadata_df.collect()
+    metadata_df.show(truncate=False)
+    # ---------------------------------------------------------------
+    # parsing
+    # ---------------------------------------------------------------
+    select_exprs = []
 
-df_valid_branches = df_validated_branch.filter(col("IS_VALID_BRANCH").isNotNull())
+    for row in metadata:
+        col_name = row["COLUMNNAME"]
+        start_pos = int(row["STARTVALUE"])
+        end_pos = int(row["ENDVALUE"])
+        data_type = row["DATA_TYPE"]
 
-# # ===================================================================================
-#                 #    || CURRENCY ||
-# # ===================================================================================
-try:
-    currency_query = f"""
-    (
-        SELECT CURRENCY_CODE,CURRENCY_RATE from {CURRENCY}
-    ) T1
-    """
-    currency_list = spark.read.format("jdbc") \
-        .option("url", oracle_url) \
-        .option("dbtable", currency_query) \
-        .option("user", oracle_user) \
-        .option("password", oracle_password) \
-        .option("driver", oracle_driver) \
-        .load()
-    logger.info(f"Sucessfully currencylist loaded.")
-except Exception as e:
-    logger.error(f"Error {e} while fetching the currencylist from oracle.")
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 207: 561",10,3,startTime)
-    spark.stop()
-    exit()
-
-
-df_validated_currency = df_valid_branches.join(
-    broadcast(currency_list.select(col("CURRENCY_CODE").alias("CURRENCY")).withColumn("IS_VALID_CURRENCY", lit(1))),
-    on="CURRENCY",
-    how="left"
-).withColumn(
-    "VALIDATED_CURRENCY",
-    when(col("IS_VALID_CURRENCY").isNotNull(), col("CURRENCY"))
-    .otherwise(lit("invalid_CURRENCY"))
-)
-
-
-df_invalid_currency = df_validated_currency.where(col("VALIDATED_CURRENCY") == "invalid_CURRENCY").withColumn("REASON",lit("INVALID CURRENCY")).select(
-"BRANCH_CODE",
-"BATCH_ID",
-"CURRENCY",
-"CGL",
-"NARRATION",
-"DEBIT_AMOUNT",
-"CREDIT_AMOUNT",
-"TRANSACTION_COUNT",
-"SOURCE_FLAG",
-"REASON"    
-)
-
-df_valid_currency = df_validated_currency.where(col("VALIDATED_CURRENCY") != "invalid_CURRENCY")
-
-df_valid_currency =  df_valid_currency.drop(col("VALIDATED_CURRENCY"),col("IS_VALID_CURRENCY"))
-
-
-invalid_df = df_invalid_branches.unionByName(df_invalid_currency).withColumn("DATE",F.to_date(F.lit(posting_date_str)))
-
-# # ===================================================================================
-#                 #    || CGL ||
-# # ===================================================================================
-try:
-    cgl_query = f"""
-    (
-        SELECT CGL_NUMBER FROM {CGLS} 
-    ) T1
-    """
-    master_cgl_list = spark.read.format("jdbc") \
-        .option("url", oracle_url) \
-        .option("dbtable", cgl_query) \
-        .option("user", oracle_user) \
-        .option("password", oracle_password) \
-        .option("driver", oracle_driver) \
-        .load()
-    logger.info(f"Sucessfully cgl list loaded")
-except Exception as e:
-    logger.error(f"Error {e} while loading cgl list")  
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in fetching data   : 208: 617",10,3,startTime)
-    spark.stop()
-    exit()
-
-try: 
-    df_validated = df_valid_currency.join(
-        broadcast(master_cgl_list.select(col("CGL_NUMBER").alias("CGL")).withColumn("IS_VALID", lit(1))),
-        on="CGL",
-        how="left"
-    ).withColumn(
-        "VALIDATED_CGL",
-        when(col("IS_VALID").isNotNull(), col("CGL"))
-        .when(col("CGL").startswith("5"), lit("5000000000"))
-        .otherwise(lit("1111111111"))
-    ).withColumn(
-        "NARRATION1",   
-        when(col("IS_VALID").isNull(), 
-             concat(lit("INVALID CGL: "), col("CGL"), lit(" - "), col("NARRATION")))
-        .otherwise(col("NARRATION"))
-    )
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in join  : 208: 638",10,3,startTime)
-    spark.stop()
-    exit()
-
-
-
-import pyspark.sql.functions as F
-
-
-try:
-    result = df_validated.groupBy("VALIDATED_CGL", "CURRENCY", "BRANCH_CODE","SOURCE_FLAG").agg(
-        F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
-        F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
-        F.sum("TRANSACTION_COUNT").alias("TRANSACTION_COUNT"),
-        F.first("NARRATION1").alias("NARRATION"),    
-        F.first("BATCH_ID").alias("BATCH_ID"),
-        F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-    ).select(F.col("VALIDATED_CGL").alias("CGL"), "CURRENCY", "BRANCH_CODE","NARRATION", "SOURCE_FLAG", "BATCH_ID", "DEBIT_AMOUNT", "CREDIT_AMOUNT", "TRANSACTION_COUNT","JOURNAL_ID")
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID , "ERROR in grpby  : 209: 658",10,3,startTime)
-    spark.stop()
-    exit()
-    
-
-# ===================================================================================
-#    || Balancing and PPF Logic ||
-# ===================================================================================
-
-result_net1 = result.withColumn(
-    "check",
-    when(substring(col("CGL"), 1, 1) == "5", lit("5000000000"))
-    .otherwise(lit("1111111111"))
-)
-
-try:
-    new_result =result_net1.groupBy("BRANCH_CODE","CURRENCY",col("check").alias("CGL"),"SOURCE_FLAG").agg(
-        F.sum("DEBIT_AMOUNT").alias("DEBIT_AMOUNT"),
-        F.sum("CREDIT_AMOUNT").alias("CREDIT_AMOUNT"),
-        F.first("NARRATION").alias("NARRATION"),     
-        F.first("BATCH_ID").alias("BATCH_ID"),
-        F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-        F.sum("TRANSACTION_COUNT").alias("TRANSACTION_COUNT")
-        ).withColumn(
-        "NET", 
-        col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
-    )
-except Exception as e:
-    log_etl(spark,"GLIF", RUN_ID , "ERROR in grpby  :",10,3,startTime)
-    spark.stop()
-    exit()
-
-
-synthetic = new_result.filter(col("NET") != 0).select(
-    col("CGL"),col("CURRENCY"),col("BRANCH_CODE"),
-    when(col("NET") < 0, -col("NET")).otherwise(lit(0)).alias("DEBIT_AMOUNT"),
-    when(col("NET") > 0, -col("NET")).otherwise(lit(0)).alias("CREDIT_AMOUNT"),
-    col("TRANSACTION_COUNT"),
-    F.lit("OUT OF BALANCE").alias("NARRATION"),
-    col("SOURCE_FLAG"),
-    col("BATCH_ID"),
-    col("JOURNAL_ID"))
-
-try:
-    final_balanced = result.unionByName(synthetic)
-except Exception as e:
-    log_etl(spark,"GLIF",RUN_ID ,"ERROR in union :",10,3,startTime)
-    spark.stop()
-    exit()
-final_balanced.cache()    
-journal_id = get_journal_id(spark)
-PPF_Posting = ppf_postings(final_balanced).withColumn("JOURNAL_ID", F.lit(journal_id))
-
-PPF_Posting_df = final_balanced.unionByName(PPF_Posting)
-
-PPF_Posting = PPF_Posting_df.withColumn("TRANSACTION_DATE",F.to_date(F.lit(posting_date_str)))
-PPF_Posting.cache()
-log_etl(spark,"GLIF",RUN_ID , "Transactions Calculated",11,2,startTime)
-# ===============================================================================
-# Journal entries data from the database
-# ===============================================================================
-
-filter_date_str = yesterday
-
-
-if(RUN_ID>1):
-    sql_query = f"""(
-                        SELECT BRANCH_CODE, CURRENCY, CGL,DEBIT_AMOUNT,CREDIT_AMOUNT,BATCH_ID,JOURNAL_ID,NARRATION,TRANSACTION_COUNT,SOURCE_FLAG 
-                        FROM {TRANSACTIONS} 
-                        WHERE TRUNC(TRANSACTION_DATE) = TO_DATE('{filter_date_str}', 'YYYY-MM-DD') and SOURCE_FLAG='J'
-                    ) T1"""
-    try:
-        journal_entries = read_oracle(spark,sql_query)
-
-        logger.info(f"Journal entries loaded from db for {filter_date_str} date.")
-    except Exception as e:
-        logger.error(f"Error {e} while loading Journal entries for {filter_date_str} date.")
-        log_etl(spark,"GLIF",RUN_ID , "ERROR in db reading  : 212: 741",10,3,startTime)
-        spark.stop()
-        exit()
-
-    PPF_Posting_df = PPF_Posting_df.unionByName(journal_entries).groupBy("CGL","BRANCH_CODE","CURRENCY","SOURCE_FLAG").agg(
-        F.sum(col("DEBIT_AMOUNT")).alias("DEBIT_AMOUNT"),
-        F.sum(col("CREDIT_AMOUNT")).alias("CREDIT_AMOUNT"),
-        F.sum(col("TRANSACTION_COUNT")).alias("TRANSACTION_COUNT"),
-        F.first("NARRATION").alias("NARRATION"),
-        F.first("BATCH_ID").alias("BATCH_ID"),
-        F.first("JOURNAL_ID").alias("JOURNAL_ID"),
-        ).select("BRANCH_CODE", "CURRENCY", "CGL","DEBIT_AMOUNT","CREDIT_AMOUNT","BATCH_ID","JOURNAL_ID","NARRATION","TRANSACTION_COUNT","SOURCE_FLAG")
-    
-processed_df = PPF_Posting_df.withColumn(
-    "BALANCE", 
-    col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
-).select("CGL", "BALANCE","CURRENCY","BRANCH_CODE")
-
-# ====================================================================================================================================================================================================================================================================
-
-# ====================================================================================================================================================================================================================================================================
-
-
-processed_df=processed_df.select(concat(
-    col("BRANCH_CODE"),
-    col("CURRENCY"),
-    col("CGL")).alias("glcc"), 
-    col("BALANCE"))
-
-try:
-    df_gl = spark.read.format("delta").load(GL_DATALAKE_PATH).filter(col("BALANCE_DATE") == yesterday)
-    df_gl = df_gl.select(col("GLCC").alias("glcc"),col("closing_balance").cast(DecimalType(25,4)).alias("BALANCE"))
-    logger.info(f"Data loaded from deltalake.")
-except Exception as e:
-        try:
-            BALANCE_query = f"""(select CGL, CURRENCY, BRANCH_CODE, BALANCE from {BALANCE} where BALANCE_DATE = TO_DATE('{yesterday}', 'YYYY-MM-DD')) a"""
-            gl_yesterday = read_oracle(spark,BALANCE_query)
-    
-            print("yesterday gl")
-            print("yesterday gl")
-            df_gl= gl_yesterday.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"), col("BALANCE"))
-            
-        except Exception as e:
+        length = end_pos - start_pos + 1
+        base_col = F.substring(F.col("raw_record"), start_pos, length)
         
-            df_gl=spark.createDataFrame([],schema="""glcc STRING, BALANCE DECIMAL(25,4)""")
-            logger.error(f"Error {e} while loading data from delta lake.")
-            log_etl(spark,"GLIF",RUN_ID , "Error while loading data from delta lake. : 213: 792",10,3,startTime)
-            spark.stop()
-try:
-    combined_df = processed_df.unionByName(df_gl)
-except Exception as e:
-    logger.error(f"Error {e} in union")
-    log_etl(spark,"GLIF",RUN_ID , "Error while union : 214: 800",10,3,startTime)
-    spark.stop()
-    exit()
+        if data_type in ("varchar", "char", "string"):
+            final_col = base_col.cast(StringType())
+
+        elif data_type in ("int", "integer"):
+            final_col = base_col.cast(IntegerType())
+
+        elif data_type in ("long", "bigint"):
+            final_col = base_col.cast(LongType())
+
+        elif data_type in ("decimal", "number"):
+            final_col = base_col.cast(DecimalType(38, 18))
+
+        else:
+            raise Exception(f"Unsupported DATA_TYPE: {data_type}")
+
+        select_exprs.append(final_col.alias(col_name))
+
+    final_df = raw_df.select(*select_exprs)
+
+    final_df = (
+        final_df
+        .withColumn("file_name", F.lit(file_name))
+    )
+
+    # ---------------------------------------------------------------
+    # WRITE TO DELTA
+    # ---------------------------------------------------------------
+    final_df.write.format("delta") \
+        .mode("append") \
+        .save(etl_folder)
+
+    print(f"{file_name} written to Delta")
+
+    # ---------------------------------------------------------------
+    # VERIFY RECORD COUNT (FROM DELTA)
+    # ---------------------------------------------------------------
+    delta_df = spark.read.format("delta").load(etl_folder)
+    delta_df.createOrReplaceTempView("temp_loaded_file")
+
+    record_count = spark.sql(f"""
+        SELECT COUNT(*)
+        FROM temp_loaded_file
+        WHERE file_name = '{file_name}'
+    """).collect()[0][0]
+
+    print(f"Verified record count in delta = {record_count}")
+
+    return record_count
+
+
+# ---------------------------------------------------------------
+# MAIN 
+# ---------------------------------------------------------------
+def main():
+    spark.sparkContext.setLogLevel("ERROR")
+
+    print("====================================")
+    print("Starting GLIF test load")
+    print("====================================")
+
+    try:
+        record_count = process_single_file_dynamic(spark)
+
+        print("====================================")
+        print(f"Loaded records : {record_count}")
+        print("====================================")
+
+    except Exception as e:
+        print("JOB FAILED")
+        print(str(e))
+        raise
+
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()
+
+# from pyspark.sql import functions as F
+# from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
+
+# from common.fileUtil import get_delta_path_by_file_type
+# from common.dateUtil import get_etl_date
+# from common.fileUtil import paths_for_read
+
+
+# def process_single_file_dynamic(spark, file_name):
+
+#     # ---------------------------------------------------------------
+#     # ETL DATE
+#     # ---------------------------------------------------------------
+#     etl_date = get_etl_date(spark)
+#     etl_date_str = etl_date.strftime("%Y-%m-%d")
+#     today_str = etl_date.strftime("%d%m%Y")
+
+#     # ---------------------------------------------------------------
+#     # detecting file type
+#     # ---------------------------------------------------------------
+#     file_name_upper = file_name.upper()
+#     file_type = ""
+#     path_type = ""
+#     if file_name_upper.startswith("GLIF"):
+#         file_type = "GLIF"
+#         path_type = "glif"
+
+#     elif file_name_upper.startswith("INV"):
+#         file_type = "INVTOGL"
+#         path_type = "bancs24"
+
+#     elif file_name_upper.startswith("BOR"):
+#         file_type = "BORTOGL"
+#         path_type = "bancs24"
+
+#     elif file_name_upper.startswith("GLCCTA"):
+#         file_type = "GLCCTA"
+#         path_type = "bancs24"
+
+#     elif file_name_upper.startswith("GLCCGEN"):
+#         file_type = "GLCCGEN"
+#         path_type = "bancs24"
+
+#     else:
+#         raise Exception(f"Unsupported file name: {file_name}")
+
+#     # ---------------------------------------------------------------
+#     # paths to read
+#     # ---------------------------------------------------------------
+#     path_dict = paths_for_read(path_type, etl_date, today_str)
+#     landing_dir = path_dict["HDFS_PATH"]
+#     file_path = f"{landing_dir}/{file_name}"
+
+#     print(f"Reading file from: {file_path}")
+
+#     # ---------------------------------------------------------------
+#     # creating ETL folder
+#     # ---------------------------------------------------------------
+#     target_delta_path = get_delta_path_by_file_type(file_type,etl_date)
+#     # base_root = base_delta_path.rsplit("/", 1)[0]
+#     # target_delta_path = f"{base_root}/{etl_date_str}/{file_type}"
+
+#     print(f"Writing to delta path: {target_delta_path}")
+
+#     raw_df = (
+#         spark.read.text(file_path)
+#         .withColumnRenamed("value", "RAW_RECORD")
+#     )
+
+#     # ---------------------------------------------------------------
+#     # metadata from Oracle
+#     # ---------------------------------------------------------------
+#     #use readwrite sql from common functions 
+#     metadata_df = (
+#         spark.table("FINCORE.TOTALDATAPARAMETERS")
+#         .filter(F.upper(F.col("FILE_TYPE")) == file_type)
+#         .filter(F.upper(F.col("TOBEINCLUDED")) == "YES")
+#         .select(
+#             F.upper(F.col("COLUMNNAME")).alias("COLUMNNAME"),
+#             F.col("STARTVALUE"),
+#             F.col("ENDVALUE"),
+#             F.upper(F.col("DATA_TYPE")).alias("DATA_TYPE")
+#         )
+#         .orderBy("STARTVALUE")
+#     )
+
+#     metadata = metadata_df.collect()
+
+#     # ---------------------------------------------------------------
+#     # parsing
+#     # ---------------------------------------------------------------
+#     select_exprs = []
+
+#     for row in metadata:
+#         col_name = row["COLUMNNAME"]
+#         start_pos = int(row["STARTVALUE"])
+#         end_pos = int(row["ENDVALUE"])
+#         data_type = row["DATA_TYPE"]
+
+#         length = end_pos - start_pos + 1
+#         base_col = F.substring(F.col("RAW_RECORD"), start_pos, length)
+
+#         if data_type in ("VARCHAR", "CHAR", "STRING"):
+#             final_col = base_col.cast(StringType())
+
+#         elif data_type in ("INT", "INTEGER"):
+#             final_col = base_col.cast(IntegerType())
+
+#         elif data_type in ("LONG", "BIGINT"):
+#             final_col = base_col.cast(LongType())
+
+#         elif data_type in ("DECIMAL", "NUMBER"):
+#             final_col = base_col.cast(DecimalType(38, 18))
+
+#         else:
+#             raise Exception(f"Unsupported DATA_TYPE: {data_type}")
+
+#         select_exprs.append(final_col.alias(col_name))
+
+#     final_df = raw_df.select(*select_exprs)
+
+#     final_df = (
+#         final_df
+#         .withColumn("FILE_NAME", F.lit(file_name))
+#         .withColumn("ETL_DATE", F.lit(etl_date_str))
+#     )
+
+#     # ---------------------------------------------------------------
+#     # writing to delta
+#     # ---------------------------------------------------------------
+#     final_df.write.format("delta") \
+#         .mode("append") \
+#         .save(target_delta_path)
+
+#     print(f"{file_name} written to Delta")
+
+#     # ---------------------------------------------------------------
+#     # reading back from delta
+#     # ---------------------------------------------------------------
+#     # delta_df = spark.read.format("delta").load(target_delta_path)
+
+#     # # filtering only this file
+#     # file_loaded_df = delta_df.filter(
+#     #     (F.col("FILE_NAME") == file_name) &
+#     #     (F.col("ETL_DATE") == etl_date_str)
+#     # )
+
+#     # ---------------------------------------------------------------
+#     # final count from delta
+#     # ---------------------------------------------------------------
+#     # record_count = file_loaded_df.count()
+#     spark.read.format("delta").load(target_delta_path).createOrReplaceTempView("temp_glif")
+
+#     #     # --- Method 1: TRUNCATE TABLE (Recommended for clearing data while keeping schema) ---
+#     #     # This operation is atomic and fast. It removes all data files but keeps the Delta log history.
+#     #     # spark.sql("TRUNCATE TABLE temp_gl_balance")
+#     #     # print(f"Successfully truncated all data from the Delta Lake table.")
+
+#     #     # # Verify the count
+#     record_count = spark.sql("SELECT COUNT(*) FROM temp_glif where FILE_NAME='{file_name}' and ETL_DATE='{etl_date_str}'").collect()[0][0]
+#     #     print(f"Row count after truncation: {count_after_truncate}")
+
+
+#     print(f"Verified record count in delta = {record_count}")
+#     return record_count 
+
+
+
+
+
     
-final_aggregated_df = combined_df.groupBy("glcc").agg(sum("BALANCE").alias("BALANCE"))
+# import os
+# from pyspark.sql import SparkSession
+# from pyspark.sql import functions as F
+# from pyspark.sql.types import DecimalType, IntegerType, LongType, StringType
 
-final_aggregated_df=final_aggregated_df.withColumn("BALANCE_DATE",F.to_date(F.lit(posting_date_str)))
+# # from common.fileUtil import paths_for_read
+# from common.dateUtil import get_etl_date
+# from common.datalake_paths import get_delta_path_by_file_type
+# from common.read_write_oracle import read_oracle
+# from common.fileUtil import get_hdfs_base
+# from common.createSpark import create_spark_session
 
-dl_df=final_aggregated_df.select("glcc",col("BALANCE").alias("closing_balance").cast(DecimalType(25,4)),"BALANCE_DATE")
+# HDFS_BASE = get_hdfs_base()
+# spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
 
+# def process_single_file_dynamic(spark):
+# # put file_name as parameter with spark
+#     # ---------------------------------------------------------------
+#     # ETL DATE
+#     # ---------------------------------------------------------------
+#     etl_date = get_etl_date(spark)
+#     etl_date_str = etl_date.strftime("%Y-%m-%d")
+#     today_str = etl_date.strftime("%d%m%Y")
+#     file_path =  f"{HDFS_BASE}/CBS-FILES/GLIF/AMARAVATHI__GLIFBOR_584.gz"
+#     file_name = os.path.basename(file_path)
+#     # ---------------------------------------------------------------
+#     # detecting file type 
+#     # ---------------------------------------------------------------
+#     file_name_lower = file_name.lower()
 
-# ======================================================================================================================================================
-#                                         Month End FCNB 
-# ======================================================================================================================================================
+#     # if file_name_lower.startswith("glif"):
+#     #     file_type = "glif"
+#     #     # path_type = "glif"
+#     if "glif" in file_name_lower:
+#         file_type = "glif"
 
+#     elif file_name_lower.startswith("inv"):
+#         file_type = "invtogl"
+#         path_type = "bancs24"
+
+#     elif file_name_lower.startswith("bor"):
+#         file_type = "bortogl"
+#         path_type = "bancs24"
+
+#     elif file_name_lower.startswith("glccta"):
+#         file_type = "glccta"
+#         path_type = "bancs24"
+
+#     elif file_name_lower.startswith("glccgen"):
+#         file_type = "glccgen"
+#         path_type = "bancs24"
+
+#     else:
+#         raise Exception(f"Unsupported file name: {file_name}")
+
+#     # ---------------------------------------------------------------
+#     # landing path
+#     # # ---------------------------------------------------------------
+#     # path_dict = paths_for_read(path_type, etl_date, today_str)
+#     # landing_dir = path_dict["HDFS_PATH"]
+#     # file_path = f"{landing_dir}/{file_name}"
+
+#     # print(f"Reading file from: {file_path}")
    
-monthend = check_MonthEnd() 
-etl_date = get_etl_date(spark)
-currency_ok=run_currency_precheck(spark, etl_date, RUN_ID) 
-logger.info(f"Currency Updated::{currency_ok}")
-logger.info(f"monthend is {monthend}")
+#     # ---------------------------------------------------------------
+#     # physical folder creation
+#     # ---------------------------------------------------------------
+#     base_delta_path = get_delta_path_by_file_type(etl_date_str, file_type)
+#     target_delta_path = f"{base_delta_path}/{file_type}"
 
-if(monthend and currency_ok):
-    logger.info("Start FCNB Monthend")
-    FCNB_journal_id = get_journal_id(spark)
-    FCNB_transactions = monthend_posting(dl_df,fcnb_cgl_df,fcnb_currency,currency_list,posting_date_str,BATCH_ID_LITERAL).withColumn("JOURNAL_ID", F.lit(FCNB_journal_id)).withColumn("BATCH_ID", F.lit(BATCH_ID_LITERAL))
-    FCNB_result=FCNB_transactions.withColumn(
-    "BALANCE", 
-    col("DEBIT_AMOUNT") + col("CREDIT_AMOUNT")
-    ).select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"),col("BALANCE").alias("closing_balance"), F.lit(posting_date_str).cast(DateType()).alias("BALANCE_DATE"))
-    dl_df = dl_df.unionAll(FCNB_result)
-    
-    
-    
+#     # creating hdfs folder just once
+#     hadoop_conf = spark._jsc.hadoopConfiguration()
+#     fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
+#     path = spark._jvm.org.apache.hadoop.fs.Path(target_delta_path)
+#     fs.mkdirs(path)
 
-# # # ==============================================================================================================
-dl_df =dl_df.groupBy("glcc").agg(
-    sum("closing_balance").alias("BALANCE"),
-    F.first("BALANCE_DATE").alias("BALANCE_DATE")
-).select("glcc","BALANCE","BALANCE_DATE")
+#     print(f"Writing to delta path: {target_delta_path}")
 
+#     # ---------------------------------------------------------------
+#     # READING RAW FIXED WIDTH FILE
+#     # ---------------------------------------------------------------
+#     raw_df = (
+#         spark.read.text(file_path)
+#         .withColumnRenamed("value", "raw_record")
+#     )
 
-df_gl_balance_final = dl_df.withColumns({ 
-    "BRANCH_CODE": substring(F.col("glcc"), 1, 5),
-    "CURRENCY": substring(F.col("glcc"), 6, 3),
-    "CGL": substring(F.col("glcc"), 9, 10),
-}).select("BRANCH_CODE","CURRENCY","CGL","BALANCE_DATE","BALANCE")
-df_gl_balance_final.cache()
-df_converted = (
-   df_gl_balance_final
-   .join(
-       broadcast(currency_list),
-       df_gl_balance_final["CURRENCY"] == currency_list["CURRENCY_CODE"],
-       "left"
-   )
-   .select(
-       col("BRANCH_CODE"),
-       col("CURRENCY"),
-       col("CGL"),
-       col("BALANCE_DATE"),
-       col("BALANCE"),
-       col("CURRENCY_RATE")  
-   )
-   .withColumn(
-       "APPLIED_RATE",
-       when(col("CURRENCY") == "INR", lit(1))
-       .otherwise(coalesce(col("CURRENCY_RATE"), lit(1)))
-   )
-   .withColumn(
-       "INR_BALANCE",
-       round(col("BALANCE") * col("APPLIED_RATE"),2).cast(DecimalType(25, 2))
-   )
-)
-balance_df = df_converted.select(
-   "CGL",
-   "CURRENCY",
-   "BRANCH_CODE",
-   "BALANCE",
-   "INR_BALANCE",
-   "BALANCE_DATE"
-)
-balance_df.cache()
-# ==================================================================================
+    # ---------------------------------------------------------------
+    # reading metadata from Oracle
+    # ---------------------------------------------------------------
+    # metadata_query = f"""
+    # (
+    #     SELECT
+    #         lower(COLUMNNAME) as columnname,
+    #         STARTVALUE,
+    #         ENDVALUE,
+    #         lower(DATA_TYPE) as data_type
+    #     FROM FINCORE.TOTALDATAPARAMETERS
+    #     WHERE lower(FILE_TYPE) = '{file_type}'
+    #     AND lower(TOBEINCLUDED) = 'yes'
+    #     ORDER BY STARTVALUE
+    # ) temp
+    # """
 
-deltalake_final = balance_df.select(concat(col("BRANCH_CODE"),col("CURRENCY"),col("CGL")).alias("glcc"),col("BALANCE").cast(DecimalType(25,4)).alias("closing_balance"), F.lit(posting_date_str).cast(DateType()).alias("BALANCE_DATE"),F.col("INR_BALANCE"))
-# ==================================================================================
-log_etl(spark,"GLIF",RUN_ID , "Balance Calculated",12,2,startTime) 
-try:
-    deltalake_final.write.format("delta").mode("append").save(GL_DATALAKE_PATH)
-except Exception as e:
-    logger.info(f"Error during saving in datalake  {e}")
-    log_etl(spark,"GLIF",RUN_ID ,"Error saving gl_balance : 216: 910",14,3,startTime)
-    spark.stop()
-    exit()
+    # metadata_df = read_oracle(spark, metadata_query)
+    # metadata = metadata_df.collect()
 
-try:
-    logger.info(f"\nCreating manifest file for Spark Stream trigger...")
+    # # ---------------------------------------------------------------
+    # # parsing
+    # # ---------------------------------------------------------------
+    # select_exprs = []
 
-    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+    # for row in metadata:
+    #     col_name = row["columnname"]
+    #     start_pos = int(row["STARTVALUE"])
+    #     end_pos = int(row["ENDVALUE"])
+    #     data_type = row["data_type"]
 
-    with open(manifest_filename, "w") as f:
-        f.write("GL_balance successful")
+    #     length = end_pos - start_pos + 1
+    #     base_col = F.substring(F.col("raw_record"), start_pos, length)
 
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-    fs.copyFromLocalFile(False, True, spark._jvm.Path(manifest_filename), spark._jvm.Path(spark_stream_path))
+    #     if data_type in ("varchar", "char", "string"):
+    #         final_col = base_col.cast(StringType())
 
-    logger.info(f"Manifest file uploaded to: {spark_stream_path}")
-except Exception as e:
-    logger.info(f"Error during Delta or manifest stage: {e}")
-    log_etl(spark,"GLIF",RUN_ID , "Error writing Mnaifest: 216: 910",14,3,startTime)
-    spark.stop()
-    exit()
+    #     elif data_type in ("int", "integer"):
+    #         final_col = base_col.cast(IntegerType())
 
+    #     elif data_type in ("long", "bigint"):
+    #         final_col = base_col.cast(LongType())
 
-# ==============================================================================================================
+    #     elif data_type in ("decimal", "number"):
+    #         final_col = base_col.cast(DecimalType(38, 18))
 
-try:
-    write_oracle(balance_df,BALANCE)
+    #     else:
+    #         raise Exception(f"Unsupported DATA_TYPE: {data_type}")
 
-    logger.info(f"Successfully data written into balance table")
-    log_etl(spark,"GLIF",RUN_ID , "Closing Balance updated",14,2,startTime)
-except Exception as e:
-    logger.info(f"Error writing INVALID records: {e}")
-    log_etl(spark,"GLIF",RUN_ID , "Error writing to Oracle DB: 217: 930",14,3,startTime)
-    spark.stop()
-    exit()
+    #     select_exprs.append(final_col.alias(col_name))
 
-try:
-    write_oracle(PPF_Posting,TRANSACTIONS)
+    # final_df = raw_df.select(*select_exprs)
 
-    logger.info(f"=== Data successfully written to transaction table Oracle DB ===") 
-    log_etl(spark,"GLIF",RUN_ID , "Transactions posting posted",15,2,startTime)
-except Exception as e:
-    logger.info(f"Error writing to Oracle DB: {e}")
-    log_etl(spark,"GLIF",RUN_ID , "Error writing Transactions to Oracle DB: 218: 947",16,3,startTime)
-    spark.stop()
-    exit()
-try:
-    write_oracle(FCNB_transactions,TRANSACTIONS)
+    # final_df = (
+    #     final_df
+    #     .withColumn("file_name", F.lit(file_name))
+    # )
 
-    logger.info(f"=== Data successfully written to transaction table Oracle DB ===")
-    log_etl(spark,"GLIF", RUN_ID , "FNCB Transaction Posted",13,2,startTime) 
-except Exception as e:
-    logger.error(f"Error writing to Oracle DB: {e}") 
-    log_etl(spark,"GLIF",RUN_ID ,"Error in posting FNCB Transaction Oracle DB: 215: 833",13,3,startTime)
-    spark.stop()
-    exit()
+#     # ---------------------------------------------------------------
+#     # writing into delta
+#     # ---------------------------------------------------------------
+#     final_df.write.format("delta") \
+#         .mode("append") \
+#         .save(target_delta_path)
 
-try:
-    write_oracle(invalid_df,INVALID)
+#     print(f"{file_name} written to Delta")
 
-    logger.info(f"=== Invalid records written to DB ===")
-    log_etl(spark,"GLIF",RUN_ID , "Invalid data saved",17,2,startTime)
-except Exception as e:
-    logger.info(f"Error writing INVALID records: {e}")
-    log_etl(spark,"GLIF",RUN_ID ,"Error writing invaliid data to Oracle DB: 219: 965",17,3,startTime)
-    spark.stop()
-    exit()
-log_etl(spark,"GLIF",RUN_ID , "ETL PRCOESS Ended",18,2,startTime)
+#     # ---------------------------------------------------------------
+#     # reading back from delta
+#     # ---------------------------------------------------------------
+#     delta_df = spark.read.format("delta").load(target_delta_path)
+#     delta_df.createOrReplaceTempView("temp_loaded_file")
+
+#     record_count = spark.sql(f"""
+#         SELECT COUNT(*)
+#         FROM temp_loaded_file
+#         WHERE file_name = '{file_name}'
+#         AND etl_date = '{etl_date_str}'
+#     """).collect()[0][0]
+
+#     print(f"Verified record count in delta = {record_count}")
+
+#     return record_count
 
 
 
+# def main():
 
-spark.stop()
+#     # spark = (
+#     #     SparkSession.builder
+#     #     .appName("glif-test-loader")
+#     #     .enableHiveSupport()
+#     #     .getOrCreate()
+#     # )
+#     # spark.config("spark.hadoop.fs.defaultFS", "hdfs://10.0.17.76:8020")
 
+#     spark.sparkContext.setLogLevel("ERROR")
+   
+#     file_name = "GLIF_AMARAVATHI__GLIFBOR.gz"
+
+#     print("====================================")
+#     print(f"Starting test load for : {file_name}")
+#     print("====================================")
+
+#     try:
+#         record_count = process_single_file_dynamic(spark, file_name)
+
+#         print("====================================")
+#         print(f"Loaded records : {record_count}")
+#         print("====================================")
+
+#     except Exception as e:
+#         print("JOB FAILED")
+#         print(str(e))
+#         raise
+
+#     finally:
+#         spark.stop()
+
+# if __name__ == "__main__":
+#     main()
