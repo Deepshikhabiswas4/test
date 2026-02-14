@@ -1,115 +1,148 @@
-import datetime 
-from pyspark.sql import SparkSession , functions as F
-import pyspark.sql.types as T
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
-from pyspark.sql.functions import to_date,expr, round, col,when, length, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType, TimestampType
-from datetime import date, timedelta ,datetime
-from pyspark.sql.functions import desc
-import sys
-from py4j.java_gateway import java_import
-import concurrent.futures
-import builtins
-from pyspark.sql import Row
-import re
+import time
+import datetime
+from pyspark.sql import functions as F
+from pyspark.sql.functions import to_json, struct, col
 from common.properties import get_oracle_properties
-from common.dateUtil import get_etl_date
-oracle_properties=get_oracle_properties()
-today1 = date.today()  
-oracle_url = oracle_properties["url"]
-oracle_user = oracle_properties["user"]
-oracle_password = oracle_properties["password"]
-oracle_driver = oracle_properties["driver"]
+
+# Global dictionary to store generated processRunStageId for each (run_id, stage)
+_stage_record_ids = {}
 
 def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
+    """
+    Sends Kafka events to track ETL stage progress.
+    
+    :param spark: SparkSession
+    :param pipeline_name: name of the pipeline (unused, kept for compatibility)
+    :param run_id: process run ID (from Airflow)
+    :param remarks: description of the stage
+    :param stage: stage number (matches PROCESS_STAGE_MASTER.STAGE_ID)
+    :param status: 1 = start, 2 = success, 3 = failure
+    :param startTime: datetime when the stage started
+    """
+    global _stage_record_ids
+    key = (run_id, stage)
 
-    # -------------------------------------------------
-    # INSERT EVENT  (stage started)
-    # -------------------------------------------------
-    insert_data = [
-        (
-            0,                      # dummy id for insert
-            int(run_id),            # process run id from airflow
-            stage,                  # must match PROCESS_STAGE_MASTER.STAGE_ID
-            "spark",                # source fixed
-            1,                      # always 1 while starting
-            remarks,                # optional
-            "",                     # summary optional
+    # Kafka configuration
+    kafka_bootstrap_servers = "10.0.17.242:9092"
+    kafka_topic = "spark-events"
+
+    if status == 1:  # Stage start
+        # ---------- INSERT event ----------
+        insert_data = [(
+            0,                      # dummy processRunStageId
+            int(run_id),
+            int(stage),
+            "spark",                 # source
+            1,                       # status = running
+            remarks or "",            # remarks (optional)
+            "",                       # summary (optional, can be updated later)
             startTime,
             "INSERT"
+        )]
+
+        insert_columns = [
+            "processRunStageId",
+            "processRunId",
+            "stageId",
+            "source",
+            "status",
+            "remarks",
+            "summary",
+            "startTime",
+            "action"
+        ]
+
+        insert_df = spark.createDataFrame(insert_data, insert_columns)
+        kafka_insert_df = insert_df.select(
+            col("processRunStageId").cast("string").alias("key"),
+            to_json(struct(*insert_columns)).alias("value")
         )
-    ]
 
-    insert_columns = [
-        "processRunStageId",
-        "processRunId",
-        "stageId",
-        "source",
-        "status",
-        "remarks",
-        "summary",
-        "startTime",
-        "action"
-    ]
+        kafka_insert_df.write \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
+            .option("topic", kafka_topic) \
+            .save()
 
-    insert_df = spark.createDataFrame(insert_data, insert_columns)
+        print(f"INSERT event sent for stage {stage}, run_id {run_id}")
 
-    kafka_insert_df = insert_df.select(
-        col("processRunStageId").cast("string").alias("key"),
-        to_json(struct(*insert_columns)).alias("value")
-    )
+        # Allow time for the Java service to insert the row
+        time.sleep(3)
 
-    kafka_insert_df.write \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "10.0.17.242:9092") \
-        .option("topic", "spark-events") \
-        .save()
+        # ---------- Retrieve generated processRunStageId from Oracle ----------
+        oracle_props = get_oracle_properties()
+        oracle_url = oracle_props["url"]
+        oracle_user = oracle_props["user"]
+        oracle_password = oracle_props["password"]
+        oracle_driver = oracle_props["driver"]
 
-    print("INSERT event pushed")
+        # Format startTime for Oracle (assuming it's a datetime object)
+        start_time_str = startTime.strftime("%Y-%m-%d %H:%M:%S")
 
-    # wait so java service inserts row
-    time.sleep(5)
+        query = f"""
+            (SELECT PROCESS_RUN_STAGE_ID 
+             FROM PROCESS_RUN_STAGE 
+             WHERE PROCESS_RUN_ID = {int(run_id)}
+               AND STAGE_ID = {int(stage)}
+               AND START_TIME = TO_TIMESTAMP('{start_time_str}', 'YYYY-MM-DD HH24:MI:SS')
+            ) T1
+        """
 
-    # -------------------------------------------------
-    # UPDATE EVENT  (stage finished)
-    # -------------------------------------------------
+        try:
+            id_df = spark.read.format("jdbc") \
+                .option("url", oracle_url) \
+                .option("dbtable", query) \
+                .option("user", oracle_user) \
+                .option("password", oracle_password) \
+                .option("driver", oracle_driver) \
+                .load()
 
-    # if job failed -> increment status
-    final_status = status
-    if status != 1:
-        final_status = status + 1
+            if id_df.count() > 0:
+                stage_record_id = id_df.collect()[0][0]
+                _stage_record_ids[key] = stage_record_id
+                print(f"Retrieved processRunStageId = {stage_record_id} for stage {stage}")
+            else:
+                print(f"WARNING: No row found for stage {stage}, run_id {run_id} after INSERT")
+        except Exception as e:
+            print(f"ERROR: Could not retrieve processRunStageId: {e}")
 
-    update_data = [
-        (
-            1,                  
+    else:  # Stage end (status = 2 or 3)
+        # ---------- Retrieve stored ID ----------
+        if key not in _stage_record_ids:
+            print(f"ERROR: No stored processRunStageId for stage {stage}, run_id {run_id}. Cannot send UPDATE.")
+            return
+
+        stage_record_id = _stage_record_ids.pop(key)
+
+        # ---------- UPDATE event ----------
+        update_data = [(
+            int(stage_record_id),
             int(run_id),
-            stage,
-            final_status,       # incremented if failed
-            remarks,
+            int(stage),
+            int(status),      # final status (2 = success, 3 = failure)
+            remarks or "",
             "UPDATE"
+        )]
+
+        update_columns = [
+            "processRunStageId",
+            "processRunId",
+            "stageId",
+            "status",
+            "remarks",
+            "action"
+        ]
+
+        update_df = spark.createDataFrame(update_data, update_columns)
+        kafka_update_df = update_df.select(
+            col("processRunStageId").cast("string").alias("key"),
+            to_json(struct(*update_columns)).alias("value")
         )
-    ]
 
-    update_columns = [
-        "processRunStageId",
-        "processRunId",
-        "stageId",
-        "status",
-        "remarks",
-        "action"
-    ]
+        kafka_update_df.write \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", kafka_bootstrap_servers) \
+            .option("topic", kafka_topic) \
+            .save()
 
-    update_df = spark.createDataFrame(update_data, update_columns)
-
-    kafka_update_df = update_df.select(
-        col("processRunStageId").cast("string").alias("key"),
-        to_json(struct(*update_columns)).alias("value")
-    )
-
-    kafka_update_df.write \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "10.0.17.242:9092") \
-        .option("topic", "spark-events") \
-        .save()
-
-    print("UPDATE event pushed")
+        print(f"UPDATE event sent for stage {stage}, run_id {run_id}, status {status}")
