@@ -1,3 +1,26 @@
+import datetime 
+from pyspark.sql import SparkSession , functions as F
+import pyspark.sql.types as T
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
+from pyspark.sql.functions import to_date,expr, round, col,when, length, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp
+from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType, TimestampType
+from datetime import date, timedelta ,datetime
+from pyspark.sql.functions import desc
+import sys
+from py4j.java_gateway import java_import
+import concurrent.futures
+import builtins
+from pyspark.sql import Row
+import re
+from common.properties import get_oracle_properties
+from common.dateUtil import get_etl_date
+oracle_properties=get_oracle_properties()
+today1 = date.today()  
+oracle_url = oracle_properties["url"]
+oracle_user = oracle_properties["user"]
+oracle_password = oracle_properties["password"]
+oracle_driver = oracle_properties["driver"]
+
 def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
 
     # -------------------------------------------------
@@ -51,7 +74,6 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
     # UPDATE EVENT  (stage finished)
     # -------------------------------------------------
 
-    # IMPORTANT CHANGE:
     # if job failed -> increment status
     final_status = status
     if status != 1:
@@ -59,7 +81,7 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
 
     update_data = [
         (
-            1,                  # fixed as told
+            1,                  
             int(run_id),
             stage,
             final_status,       # incremented if failed
