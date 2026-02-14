@@ -56,3 +56,13 @@ def get_process_run_id(spark, etl_date, process_name, airflow_run_id=None):
         # No stage records for this date – start from 1
         return 1
     return int(run_id)
+
+
+
+
+
+import sys
+from common.processRun import get_process_run_id
+
+airflow_run_id = sys.argv[1] if len(sys.argv) > 1 else None
+RUN_ID = get_process_run_id(spark, posting_date_str, "GLIF", airflow_run_id)
