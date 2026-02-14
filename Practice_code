@@ -14,7 +14,7 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
     :param spark: SparkSession
     :param pipeline_name: name of the pipeline (unused, kept for compatibility)
     :param run_id: process run ID (from Airflow)
-    :param remarks: description of the stage
+    :param remarks: description of the stage (optional)
     :param stage: stage number (matches PROCESS_STAGE_MASTER.STAGE_ID)
     :param status: 1 = start, 2 = success, 3 = failure
     :param startTime: datetime when the stage started
@@ -27,25 +27,23 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
     kafka_topic = "spark-events"
 
     if status == 1:  # Stage start
-        # ---------- INSERT event ----------
+        # ---------- INSERT event (no processRunStageId) ----------
         insert_data = [(
-            0,                      # dummy processRunStageId
             int(run_id),
             int(stage),
-            "spark",                 # source
             1,                       # status = running
-            remarks or "",            # remarks (optional)
-            "",                       # summary (optional, can be updated later)
+            "spark",                  # source
+            remarks or "",             # remarks (optional)
+            "",                        # summary (optional, can be updated later)
             startTime,
             "INSERT"
         )]
 
         insert_columns = [
-            "processRunStageId",
             "processRunId",
             "stageId",
-            "source",
             "status",
+            "source",
             "remarks",
             "summary",
             "startTime",
@@ -54,7 +52,8 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
 
         insert_df = spark.createDataFrame(insert_data, insert_columns)
         kafka_insert_df = insert_df.select(
-            col("processRunStageId").cast("string").alias("key"),
+            # Use a constant key (e.g., stage) or leave empty; the Java service will handle it.
+            F.lit(str(stage)).alias("key"),
             to_json(struct(*insert_columns)).alias("value")
         )
 
@@ -66,7 +65,7 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
 
         print(f"INSERT event sent for stage {stage}, run_id {run_id}")
 
-        # Allow time for the Java service to insert the row
+        # Allow time for the Java service to insert the row and commit
         time.sleep(3)
 
         # ---------- Retrieve generated processRunStageId from Oracle ----------
@@ -76,7 +75,7 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
         oracle_password = oracle_props["password"]
         oracle_driver = oracle_props["driver"]
 
-        # Format startTime for Oracle (assuming it's a datetime object)
+        # Format startTime for Oracle (adjust format to match your DB)
         start_time_str = startTime.strftime("%Y-%m-%d %H:%M:%S")
 
         query = f"""
@@ -114,7 +113,7 @@ def log_etl(spark, pipeline_name, run_id, remarks, stage, status, startTime):
 
         stage_record_id = _stage_record_ids.pop(key)
 
-        # ---------- UPDATE event ----------
+        # ---------- UPDATE event (includes processRunStageId) ----------
         update_data = [(
             int(stage_record_id),
             int(run_id),
