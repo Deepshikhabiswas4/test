@@ -1,331 +1,99 @@
-#!/usr/bin/env python3
-from pyspark.sql.functions import desc
-import os 
-import logging
-import sys
-from py4j.java_gateway import java_import
-import concurrent.futures
-from datetime import date, timedelta, datetime
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.functions import expr, col, when, trim, substring, lit, sum, to_date
-from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, FloatType
-from pyspark.storagelevel import StorageLevel
-# =========== Common Methods =============================
-from common.logger import setup_logger 
-from common.properties import get_oracle_properties
-from common.dateUtil import get_etl_date
-from common.fileUtil import files_to_read
-from common.fileUtil import paths_for_read
-from common.fileUtil import get_hdfs_base
-from common.processRun import get_run_id
-from common.createSpark import create_spark_session
-from common.fileUtil import tables_to_read
-from common.log_etl_modified import log_etl
-
 def invtogl(spark):
     try:
-        
-        
-        try:
-            log_etl(spark, process_run_id, "invtogl_filereading_started",1,"INVTOGL File Reading Started")
-            df_raw = spark.read.format("delta").load(INV_FILES)
-        except Exception as e:
-            log_etl(spark, process_run_id, "invtogl_filereading_started",3,"ERROR IN READING  INVTOGL FILES")
-            spark.stop()
-            exit()
-        
-        
-        id_col = expr("substring(value, 200, 18)")
-        amount_str = expr("substring(value, 30, 17)")
-        value_type = expr("substring(value, 47, 1)")
+        log_etl(spark, process_run_id, "invtogl_filereading_started",1,"INVTOGL Delta Reading Started")
+
+        df_raw = spark.read.format("delta").load(CBS_PARSED_DELTA_PATH) \
+                    .filter(F.lower(col("FILE_TYPE")) == "invtogl")
+
         df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "-", 1 * trim(amount_str).cast(DecimalType(25, 4)) / 1000)
-            .otherwise( -1 * trim(amount_str).cast(DecimalType(25, 4)) / 1000)
-            .alias("Amount"),
+            col("GL_ACCOUNT_ID").alias("Id"),
+            when(col("SIGN") == "-",
+                 trim(col("AMOUNT")).cast(DecimalType(25,4)) / 1000
+            ).otherwise(
+                -1 * trim(col("AMOUNT")).cast(DecimalType(25,4)) / 1000
+            ).alias("Amount")
         )
+
         return df_final
+
     except Exception as e:
-        # print(f"Error processing invtogl: {e}")
-        logger.info(f"Error processing invtogl", exc_info=True)
-        log_etl(spark, process_run_id, "invtogl_filereading_started",3,"ERROR IN READING  INVTOGL FILES")
+        logger.info("Error processing invtogl", exc_info=True)
+        log_etl(spark, process_run_id, "invtogl_filereading_started",3,"ERROR IN READING INVTOGL")
         spark.stop()
         exit()
-        raise
 
 def bortogl(spark):
     try:
-        log_etl(spark, process_run_id, "bortogl_filereading_started",1,"BORTOGL File Reading Started")
-        try:
-            df_raw = spark.read.text(f"{HDFS_PATH}/BOR*")
-        except Exception as e:
-            log_etl(spark, process_run_id, "bortogl_filereading_started",3,"Error in reading BORTOGL.")
-            spark.stop()
-            exit()
-        id_col = expr("substring(value, 105, 18)")
-        amount_str = expr("substring(value, 27, 17)")
-        value_type = expr("substring(value, 44, 1)")
+        log_etl(spark, process_run_id, "bortogl_filereading_started",1,"BORTOGL Delta Reading Started")
+
+        df_raw = spark.read.format("delta").load(CBS_PARSED_DELTA_PATH) \
+                    .filter(F.lower(col("FILE_TYPE")) == "bortogl")
 
         df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(25, 4)) / 1000)
-            .otherwise(trim(amount_str).cast(DecimalType(25, 4)) / 1000)
-            .alias("Amount"),
+            col("GL_ACCOUNT_ID").alias("Id"),
+            when(col("SIGN") == "-",
+                 -1 * trim(col("AMOUNT")).cast(DecimalType(25,4)) / 1000
+            ).otherwise(
+                trim(col("AMOUNT")).cast(DecimalType(25,4)) / 1000
+            ).alias("Amount")
         )
+
         return df_final
+
     except Exception as e:
-        # print(f"Error processing bortogl: {e}")
-        logger.info(f"Error processing bortogl", exc_info=True)
-        log_etl(spark, process_run_id, "bortogl_filereading_started",3,"Error in reading BORTOGL.")
+        logger.info("Error processing bortogl", exc_info=True)
+        log_etl(spark, process_run_id, "bortogl_filereading_started",3,"ERROR IN READING BORTOGL")
         spark.stop()
         exit()
-        raise
 
 def glccgen(spark):
     try:
-        log_etl(spark, process_run_id, "GLCCGEN_filereading_started",1,"GLCCGEN File Reading Started")
-        try:
-            df_raw = spark.read.text(f"{HDFS_PATH}/GLCC*")
-        except Exception as e:
-            log_etl(spark, process_run_id, "GLCCGEN_filereading_started",3,"ERROR in Reading GLCCGEN  Files")
-            spark.stop()
-            exit()
-        id_col = expr("substring(value, 1, 18)")
-        amount_str = expr("substring(value,26,20)")
-        value_type = expr("substring(value,46,1)")
+        log_etl(spark, process_run_id, "glccgen_filereading_started",1,"GLCCGEN Delta Reading Started")
+
+        df_raw = spark.read.format("delta").load(CBS_PARSED_DELTA_PATH) \
+                    .filter(F.lower(col("FILE_TYPE")) == "glccgen")
 
         df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(25, 4)) / 10000)
-            .otherwise(trim(amount_str).cast(DecimalType(25, 4)) / 10000)
-            .alias("Amount"),
+            col("GL_ACCOUNT_ID").alias("Id"),
+            when(col("SIGN") == "-",
+                 -1 * trim(col("AMOUNT")).cast(DecimalType(25,4)) / 10000
+            ).otherwise(
+                trim(col("AMOUNT")).cast(DecimalType(25,4)) / 10000
+            ).alias("Amount")
         )
+
         return df_final
+
     except Exception as e:
-        # print(f"Error processing glccgen: {e}")
-        logger.info(f"Error processing glccgen", exc_info=True)
-        log_etl(spark, process_run_id, "GLCCGEN_filereading_started",3,"ERROR in Reading GLCCGEN  Files")
+        logger.info("Error processing glccgen", exc_info=True)
+        log_etl(spark, process_run_id, "glccgen_filereading_started",3,"ERROR IN READING GLCCGEN")
         spark.stop()
         exit()
-        raise
 
 def glcccta(spark):
     try:
-        log_etl(spark, process_run_id, "GLCCCTA_filereading_started",1,"GLCCCTA File Reading Started")
-        try:
-            df_raw = spark.read.text(f"{HDFS_PATH}/GLCCCTA*")
-        except Exception as e:
-            log_etl(spark, process_run_id, "GLCCCTA_filereading_started",3,"ERROR in Reading GLCCCTA  Files")
-            spark.stop()
-            exit()
-        id_col = expr("substring(value, 1, 18)")
-        amount_str = expr("substring(value,26,20)")
-        value_type = expr("substring(value,46,1)")
+        log_etl(spark, process_run_id, "glcccta_filereading_started",1,"GLCCCTA Delta Reading Started")
+
+        df_raw = spark.read.format("delta").load(CBS_PARSED_DELTA_PATH) \
+                    .filter(F.lower(col("FILE_TYPE")) == "glcccta")
 
         df_final = df_raw.select(
-            id_col.alias("Id"),
-            when(value_type == "-", -1 * trim(amount_str).cast(DecimalType(25, 4)) / 10000)
-            .otherwise(trim(amount_str).cast(DecimalType(25, 4)) / 10000)
-            .alias("Amount"),
+            col("GL_ACCOUNT_ID").alias("Id"),
+            when(col("SIGN") == "-",
+                 -1 * trim(col("AMOUNT")).cast(DecimalType(25,4)) / 10000
+            ).otherwise(
+                trim(col("AMOUNT")).cast(DecimalType(25,4)) / 10000
+            ).alias("Amount")
         )
+
         return df_final
+
     except Exception as e:
-        # print(f"Error processing glccgen: {e}")
-        logger.info(f"Error processing glccgen", exc_info=True)
-        log_etl(spark, process_run_id, "GLCCCTA_filereading_started",3,"ERROR in Reading GLCCCTA  Files")
+        logger.info("Error processing glcccta", exc_info=True)
+        log_etl(spark, process_run_id, "glcccta_filereading_started",3,"ERROR IN READING GLCCCTA")
         spark.stop()
         exit()
-        raise
 
-# ============================ MAIN ============================
-def main(args):
-   
-    HDFS_BASE = get_hdfs_base()
-    
-    #============================ CONFIG & DATE ============================
-    spark = create_spark_session("HDFS_Text_to_DataLake", HDFS_BASE)
-    startTime= datetime.now()
-    today = get_etl_date(spark)
-    print("sparkstarted")
-    oracle_properties=get_oracle_properties()
-    # print(oracle_properties)
-    
-    today_str = today.strftime("%Y%m%d")
-    # print(today)
-  
-    yesterday = today - timedelta(days=1)
-    daybfyes = today -timedelta(days=3)
-
-    spark_date = today.strftime("%Y-%m-%d")
-   
-    print(spark_date)
-    PROCESS_ID= getattr(constants,"CBS_PIPELINE_ID",1)
-    process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today)
-    run_id = get_run_id(spark,spark_date,PROCESS_ID) 
-    logger = setup_logger("CBS",run_id,spark_date)
-    log_etl(spark, process_run_id, "cbs_started",1,"cbs pipeline started.")
-    logger.info(f"CBS Balance job strated | run_id={run_id}")
-
-    logger.info(f"ETL date resolved as: {today}")
-    logger.info(f"Oracle properties fetched successfully")
-
-
-    hdfs_paths = paths_for_read("bancs24",today,today_str)
-
-    HDFS_BASE = hdfs_paths["HDFS_BASE"]
-    HDFS_PATH = hdfs_paths["HDFS_PATH"]
-    CBS_BALANCE_DATALAKE_PATH = hdfs_paths["CBS_BALANCE_DATALAKE_PATH"]    
-    manifest_filename = hdfs_paths["manifest_filename"]
-    spark_stream_path = hdfs_paths["spark_stream_path"] + manifest_filename
- 
-    oracle_url = oracle_properties["url"]
-    oracle_user = oracle_properties["user"]
-    oracle_password = oracle_properties["password"]
-    oracle_driver = oracle_properties["driver"]
-    
-    oracle_tables = tables_to_read("bancs24")
-    BALANCE = oracle_tables["BALANCE"]
-
-
-    spark.conf.set("spark.hadoop.fs.defaultFS", HDFS_BASE)
-
-    posting_date_str = today.strftime("%Y-%m-%d")
-    # print("BALANCE DATE",posting_date_str)
-    logger.info(f"Balance date for processing: {posting_date_str}")
-    logger.info(f"Starting parallel file processing: invtogl, bortogl, glccgen")
-    # ---------- PARALLEL FILE PROCESSING ----------
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            f1 = executor.submit(invtogl, spark)
-            f2 = executor.submit(bortogl, spark)
-            f3 = executor.submit(glccgen, spark)
-            f4 = executor.submit(glcccta,spark)
-
-            df_invtogl = f1.result()
-            df_bortogl = f2.result()
-            df_glccgen = f3.result()
-            df_glcccta = f4.result()
-
-            logger.info(f"INVTOGL record count: {df_invtogl.count()}")
-            log_etl(spark, process_run_id, "invtogl_filereading_started",2,"INVTOGL File Reading COMPLETED")
-            logger.info(f"BORTOGL record count: {df_bortogl.count()}")
-            log_etl(spark, process_run_id, "bortogl_filereading_started",2,"BORTOGL File Reading COMPLETED")
-            logger.info(f"GLCCGEN record count: {df_glccgen.count()}")
-            log_etl(spark, process_run_id, "glccgen_filereading_started",2,"GLCCGEN File Reading COMPLETED")
-            logger.info(f"GLCCCTA record count: {df_glcccta.count()}")
-            log_etl(spark, process_run_id, "glcccta_filereading_started",2,"GLCCCTA File Reading COMPLETED")
-        log_etl(spark, process_run_id, "merging_all_filedata",1,"Merging all file data process started.")
-        final_df = df_invtogl.unionByName(df_bortogl).unionByName(df_glccgen)
-
-        logger.info(f"Final union record count: {final_df.count()}")
-     
-        final_result_df = final_df.groupBy("Id").agg(F.sum("Amount").alias("Amount"),F.count(F.col("Id")).alias("TRANSACTION_COUNT")).select("Id", "Amount","TRANSACTION_COUNT")
-        logger.info(f"Final aggregation completed successfully")
-
-    except Exception as e:
-        logger.info(f"Error during parallel load", exc_info=True)
-        log_etl(spark, process_run_id, "merging_all_filedata",3,"Error in merging all file data.")
-        spark.stop()
-        # exit()
-        # sys.exit(1)
-
-    # ---------- COMPUTE TODAY'S BALANCE ----------
-    try:
-        final_aggregated_df = (
-            final_result_df.select(
-                col("Id").alias("GLCC"),
-                col("TRANSACTION_COUNT").alias("TRANSACTION_COUNT"),
-                col("Amount").cast(DecimalType(25, 4)).alias("closing_balance"),
-            )
-            .withColumn("BALANCE_DATE", to_date(lit(posting_date_str)))
-        )
-     
-        # ------------------ WRITE TO DELTA ------------------
-        # final_aggregated_df.cache()
-        try:
-            final_aggregated_df.write \
-            .format("delta") \
-            .mode("overwrite") \
-            .option("mergeSchema", "true") \
-            .save(CBS_BALANCE_DATALAKE_PATH)
-            logger.info(f"Data written to Delta Lake at path: {CBS_BALANCE_DATALAKE_PATH}")
-            log_etl(spark, process_run_id, "merging_all_filedata",2,"Merging all data completed.")
-            log_etl(spark, process_run_id, "cbs_balance_deltalake",2,"CBS balance sucessfully written to delta lake.",0)
-            # spark.sql(f"""CREATE DATABASE IF NOT EXISTS fincoredatalakecluster""")
-            # spark.sql(f"""CREATE TABLE IF NOT EXISTS fincoredatalakecluster.CBS_balance USING DELTA LOCATION '{CBS_BALANCE_DATALAKE_PATH}'""")
-        except Exception as e:
-            logger.error(f"Error {e} while writing into delta lake path ->[ {CBS_BALANCE_DATALAKE_PATH} ]")       
-            log_etl(spark, process_run_id, "merging_all_filedata",3,"Error in writing cbs_balance to delta lake")
-            spark.stop()
-            exit()
-        
-
-        # ---------- CREATE AND UPLOAD MANIFEST FILE ----------
-       
-        logger.info(f"Creating manifest file for Spark Stream trigger...")
-        log_etl(spark, process_run_id, "cbs_balance_manifest",1,"manifest file creation state started.")
-        today_str = datetime.now().strftime("%Y%m%d")
-                
-        java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-        java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-
-        try:
-            with open(manifest_filename, "w") as f:
-                f.write("cbs_balance successful")
-                
-        except Exception as e:
-            logger.error(f"Error {e} while writing manifest file -> [{manifest_filename}]")
-            log_etl(spark, process_run_id, "cbs_balance_manifest",3," Error in writing cbs manifest file.")
-            spark.stop()
-            exit()           
-        
-        fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-        
-        fs.copyFromLocalFile(False, True, spark._jvm.Path(manifest_filename), spark._jvm.Path(spark_stream_path))
-        log_etl(spark, process_run_id, "cbs_balance_manifest",2,"manifest file uploaded successfully.")
-        logger.info(f"Manifest file uploaded to spark-stream path: {spark_stream_path}")
-    except Exception as e:
-        logger.info(f"Error during Delta or manifest stage", exc_info=True)
-        log_etl(spark, process_run_id, "cbs_balance_manifest",3," Error in writing cbs manifest file.")
-        spark.stop()
-
-
-    # ---------- INSERT INTO ORACLE ----------
-    
-    df_mapped = (
-        final_aggregated_df
-        .withColumn("BRANCH_CODE", substring(col("GLCC"), 1, 5))
-        .withColumn("CURRENCY", substring(col("GLCC"), 6, 3))
-        .withColumn("CGL", substring(col("GLCC"), 9, 10))
-    )
-
-    processed_df = df_mapped.select(
-        "CGL", "BALANCE_DATE","TRANSACTION_COUNT",
-        col("closing_balance").alias("BALANCE"),
-        "CURRENCY", "BRANCH_CODE"
-    )
-
-    try:
-        processed_df.write \
-        .format("jdbc") \
-        .option("url", oracle_url) \
-        .option("dbtable", BALANCE) \
-        .option("user", oracle_user) \
-        .option("password", oracle_password) \
-        .option("driver", oracle_driver) \
-        .mode("overwrite") \
-        .save()
-        logger.info(f"Data Successfully wrote to Oracle DB")
-        log_etl(spark, process_run_id, "cbs_balance_oracle",2, "CBS balance sucessfully written to oracle.",0)
-        
-    except Exception as e:
-        logger.info(f"Error while writing into JDBC {e}")
-        log_etl(spark, process_run_id, "cbs_started",3,"Error in writing cbs balance in oracle")
-        spark.stop()
-    log_etl(spark, process_run_id, "cbs_started",2,"Cbs pipeline completed successfully.")
-    spark.stop()
-
-
-
-if __name__=="__main__":
-    main(sys.argv)
+final_df = df_invtogl.unionByName(df_bortogl)\
+                     .unionByName(df_glccgen)\
+                     .unionByName(df_glcccta)
