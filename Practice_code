@@ -1,1 +1,7 @@
-Data Engineer specializing in PySpark-based ETL pipelines within core banking systems. Experienced in dynamic file parsing, Delta Lake, HDFS, and Oracle integrations. Strong in Spark SQL transformations, production debugging, and performance optimization. Skilled at resolving complex data issues, ensuring accuracy, and stabilizing distributed data processing workflows in enterprise environments.
+Over the past few months, I have worked on maintaining and improving large-scale data processing pipelines in an enterprise environment. I handled ingestion of structured and semi-structured data into a distributed data lake and ensured reliable transformation into usable financial datasets for downstream systems.
+
+I designed and implemented metadata-driven parsing so new data formats could be onboarded without frequent code changes. By validating schemas, correcting transformation logic, and strengthening data checks, I improved overall data accuracy and reconciliation quality.
+
+A major part of my work involved production support and troubleshooting. I analyzed logs, traced execution behavior in distributed processing jobs, and resolved recurring failures and performance bottlenecks, helping stabilize critical batch workflows.
+
+I also worked on database integrations and reporting readiness, ensuring processed data was properly aggregated, consistent, and audit-ready. Through automation and validation improvements, I reduced manual intervention and increased reliability of daily processing operations.
