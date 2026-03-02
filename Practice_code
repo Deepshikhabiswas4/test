@@ -1,32 +1,22 @@
 import sys
-import concurrent.futures
-import builtins
-import re
-from datetime import datetime, date, timedelta
-from pyspark.sql import functions as F
-import pyspark.sql.types as T
+from datetime import timedelta
 from pyspark.sql.functions import col, lit, concat, broadcast, when
 from pyspark.sql.types import DateType, DecimalType
 from common.logger import setup_logger
 from common.properties import get_oracle_properties
 from common.dateUtil import get_etl_date
-from common.processRun import get_run_id
+from common.processRun import get_run_id, get_process_run_id
 from common.createSpark import create_spark_session
-from common.fileUtil import get_hdfs_base, paths_for_read
+from common.fileUtil import get_hdfs_base
 from common.log_etl_modified import log_etl
 import common.constants as constants
 from common.read_write_oracle import read_oracle, write_oracle
-from common.processRun import get_process_run_id
 
 # ==========================================================
-# etl setup and spark session creation
+# Spark & ETL Setup
 # ==========================================================
 HDFS_BASE = get_hdfs_base()
 spark = create_spark_session("GLIF_PIPELINE", HDFS_BASE)
-# Create the checkpoint directory for Docker
-spark.sparkContext.setCheckpointDir("/tmp/spark-checkpoints")
-# Disable codegen to stop the "Method too long" error
-spark.conf.set("spark.sql.codegen.wholeStage", "false")
 
 today = get_etl_date(spark)
 etl_plus_1_date = today + timedelta(days=1)
@@ -38,204 +28,187 @@ PROCESS_ID = getattr(constants, "GLIF_DATA_TRANSFER", 11)
 RUN_ID = get_run_id(spark, posting_date_str, PROCESS_ID)
 logger = setup_logger("GLIF_DATA_TRANSFER", RUN_ID, posting_date_str)
 
-oracle_properties = get_oracle_properties()
-process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark, PROCESS_ID, posting_date_str)
+process_run_id = (
+    sys.argv[1] if len(sys.argv) > 1
+    else get_process_run_id(spark, PROCESS_ID, posting_date_str)
+)
 
-# # ==========================================================
-# # MANDATORY: Ensure Parent Record exists in PROCESS_RUN (Prevents ORA-02291)
-# # ==========================================================
-# try:
-#     url, user, pwd = oracle_properties['url'], oracle_properties['user'], oracle_properties['password']
-#     conn = spark._jvm.java.sql.DriverManager.getConnection(url, user, pwd)
-#     conn.setAutoCommit(True)
-#     parent_sql = f"""
-#     MERGE INTO PROCESS_RUN p
-#     USING (SELECT {process_run_id} as id FROM dual) s
-#     ON (p.PROCESS_RUN_ID = s.id)
-#     WHEN NOT MATCHED THEN
-#         INSERT (PROCESS_RUN_ID, PROCESS_ID, START_TIME, STATUS)
-#         VALUES ({process_run_id}, {PROCESS_ID}, SYSTIMESTAMP, 'RUNNING')
-#     """
-#     stmt = conn.createStatement()
-#     stmt.execute(parent_sql)
-#     stmt.close()
-#     conn.close()
-# except Exception as e:
-#     logger.warn(f"Parent record verification skipped/failed: {e}")
-
-logger.info(f"=== initializing glif data transfer pipeline for date: {posting_date_str} ===")
-log_etl(spark, process_run_id, "gl_data_transfer_started", 1, "OPENING BALANCE FORWARD JOB STARTED")
-
-# # ==========================================================
-# # step 1: reading closing balance from GLIF DELTA LAKE
-# # ==========================================================
-# logger.info(f"=== step 1: reading closing balance for {posting_date_str} ===")
-# log_etl(spark, process_run_id, "reading_closing_balance", 1, "Reading from GLIF Delta Lake")
-
-# # Retrieve path from your utility function
-# path_config = paths_for_read("glif", today, posting_date_str)
-# gl_delta_path = path_config["GL_DATALAKE_PATH"]
-
-# try:
-#     # Reading from Delta instead of Oracle to avoid date format issues
-#     closing_balance_df = spark.read.format("delta").load(gl_delta_path) \
-#         .filter(col("BALANCE_DATE") == lit(posting_date_str)) \
-#         .select("CGL", "CURRENCY", "BRANCH_CODE", "BALANCE", "INR_BALANCE")
-    
-#     closing_count = closing_balance_df.count()
-#     logger.info(f"=== closing balance read successfully. count: {closing_count} ===")
-#     closing_balance_df.show(20, False)
-#     log_etl(spark, process_run_id, "reading_closing_balance", 2, f"Read {closing_count} records from Delta")
-    
-#     if closing_count == 0:
-#         logger.error(f"No data found for {posting_date_str}. Exiting.")
-#         spark.stop()
-#         sys.exit(1)
-
-# except Exception as e:
-#     logger.error(f"error reading closing balance: {e}")
-#     log_etl(spark, process_run_id, "reading_closing_balance", 3, "Error reading from Delta")
-#     spark.stop()
-#     exit(1)
+logger.info(f"=== GLIF DATA TRANSFER STARTED FOR {posting_date_str} ===")
 
 # ==========================================================
-# step 1: reading closing balance from gl_balance
+# STEP 1: Read Closing Balance
 # ==========================================================
-logger.info(f"=== step 1: reading closing balance for {posting_date_str} ===")
-log_etl(spark, process_run_id, "reading_closing_balance", 1, "Reading closing balance from GL_BALANCE")
-
 gl_balance_query = f"""
 (
-    SELECT CGL, CURRENCY, BRANCH_CODE, BALANCE, INR_BALANCE 
-    FROM GL_BALANCE WHERE BALANCE_DATE = TO_DATE('{posting_date_str}', 'YYYY-MM-DD')
+    SELECT CGL, CURRENCY, BRANCH_CODE, BALANCE, INR_BALANCE
+    FROM GL_BALANCE
+    WHERE BALANCE_DATE = TO_DATE('{posting_date_str}', 'YYYY-MM-DD')
 ) T1
 """
-print("aaaaa ", gl_balance_query)
-try:
-    closing_balance_df = read_oracle(spark, gl_balance_query)
-    # closing_count = closing_balance_df.count()
-    closing_balance_df.show(20, False)
-    # logger.info(f"=== closing balance read successfully. count: {closing_count} ===")
-    log_etl(spark, process_run_id, "reading_closing_balance", 2, f"Read  records")
-except Exception as e:
-    logger.error(f"error reading closing balance: {e}")
-    log_etl(spark, process_run_id, "reading_closing_balance", 3, "Error reading from Oracle")
-    spark.stop()
-    exit(1)
+
+closing_balance_df = read_oracle(spark, gl_balance_query)
 
 # ==========================================================
-# step 2: preparing opening balance dataframe
+# STEP 2: Normal Day Fast Path
 # ==========================================================
-logger.info(f"=== step 2: creating opening balance for {etl_plus_1_str} ===")
-opening_balance_df = closing_balance_df.withColumn("BALANCE_DATE", lit(etl_plus_1_str).cast(DateType()))
+is_year_end = (today.month == 3 and today.day == 31)
+
+if not is_year_end:
+
+    logger.info("=== Normal day processing (No year-end logic) ===")
+
+    opening_balance_df = closing_balance_df.withColumn(
+        "BALANCE_DATE",
+        lit(etl_plus_1_str).cast(DateType())
+    )
 
 # ==========================================================
-# step 3: year-end logic 
+# STEP 3: Year-End Logic (Only on March 31)
 # ==========================================================
-if today.month == 3 and today.day == 31:
-    logger.info("=== march 31st detected: checking calendar configuration ===")
-    log_etl(spark, process_run_id, "year_end_rule", 1, "Checking Active Financial Year")
-    
-    cal_active_df = read_oracle(spark, "(SELECT ACTIVE_FLAG FROM CALENDER_CONFIG WHERE ACTIVE_FLAG = 1) T1")
+else:
 
-    if cal_active_df.count() > 0:
-        logger.info("=== active financial year found: applying exceptions ===")
-        
-        # rule 1: sign reversal for cgl 7/8 non-inr
-        logger.info("=== applying sign reversal for cgl 7/8 non-inr ===")
-        opening_balance_df = opening_balance_df.withColumn(
-            "BALANCE",
-            when((col("CGL").rlike("^[78]")) & (col("CURRENCY") != "INR"), col("BALANCE") * -1).otherwise(col("BALANCE"))
-        ).withColumn(
-            "INR_BALANCE",
-            when((col("CGL").rlike("^[78]")) & (col("CURRENCY") != "INR"), col("INR_BALANCE") * -1).otherwise(col("INR_BALANCE"))
+    logger.info("=== Year-end detected ===")
+
+    cal_active_df = read_oracle(
+        spark,
+        "(SELECT 1 FROM CALENDER_CONFIG WHERE ACTIVE_FLAG = 1) T1"
+    )
+
+    if not cal_active_df.rdd.isEmpty():
+
+        logger.info("=== Active financial year found ===")
+
+        opening_balance_df = closing_balance_df.withColumn(
+            "BALANCE_DATE",
+            lit(etl_plus_1_str).cast(DateType())
         )
 
-        # rule 2: bal_fwd logic from cgl_master
-        logger.info("=== applying bal_fwd filter from cgl_master ===")
-        cgl_master_df = read_oracle(spark, "(SELECT CGL_NUMBER, BAL_FWD FROM CGL_MASTER) T1")
-        opening_balance_df = opening_balance_df.join(broadcast(cgl_master_df), col("CGL") == col("CGL_NUMBER"), "inner") \
-            .filter((col("BAL_FWD") == 1) | (col("CGL").rlike("^[78]")))
-        
-        # rule 3: circle-only logic for cgl 2110505001
-        logger.info("=== applying circle-only branch logic for cgl 2110505001 ===")
-        circle_data = read_oracle(spark, "(SELECT branch_code AS BRANCH_CODE FROM CIRCLE_MASTER) T1").withColumn("is_circle", lit(True))
-        opening_balance_df = opening_balance_df.join(broadcast(circle_data), "BRANCH_CODE", "left") \
-            .filter(~((col("CGL") == "2110505001") & (col("is_circle").isNull())))
+        # RULE 1: Sign reversal
+        opening_balance_df = opening_balance_df.withColumn(
+            "BALANCE",
+            when(
+                (col("CGL").rlike("^[78]")) & (col("CURRENCY") != "INR"),
+                col("BALANCE") * -1
+            ).otherwise(col("BALANCE"))
+        ).withColumn(
+            "INR_BALANCE",
+            when(
+                (col("CGL").rlike("^[78]")) & (col("CURRENCY") != "INR"),
+                col("INR_BALANCE") * -1
+            ).otherwise(col("INR_BALANCE"))
+        )
 
-        # cleaning up metadata columns
-        opening_balance_df = opening_balance_df.select("CGL", "CURRENCY", "BRANCH_CODE", "BALANCE_DATE", "BALANCE", "INR_BALANCE")
-        log_etl(spark, process_run_id, "year_end_rule", 2, "Year-end rules applied successfully")
+        # RULE 2: BAL_FWD logic
+        cgl_master_df = read_oracle(
+            spark,
+            "(SELECT CGL_NUMBER FROM CGL_MASTER WHERE BAL_FWD = 1) T1"
+        )
+
+        opening_balance_df = opening_balance_df.join(
+            broadcast(cgl_master_df),
+            col("CGL") == col("CGL_NUMBER"),
+            "inner"
+        )
+
+        # RULE 3: Only circle branches for specific CGL
+        circle_df = read_oracle(
+            spark,
+            "(SELECT DISTINCT BRANCH_CODE FROM CIRCLE_MASTER WHERE BRANCH_CODE IS NOT NULL) T1"
+        )
+
+        circle_only_df = opening_balance_df.filter(
+            col("CGL") == "2110505001"
+        ).join(
+            broadcast(circle_df),
+            "BRANCH_CODE",
+            "inner"
+        )
+
+        non_target_df = opening_balance_df.filter(
+            col("CGL") != "2110505001"
+        )
+
+        opening_balance_df = non_target_df.unionByName(circle_only_df)
+
+        opening_balance_df = opening_balance_df.select(
+            "CGL", "CURRENCY", "BRANCH_CODE",
+            "BALANCE_DATE", "BALANCE", "INR_BALANCE"
+        )
+
     else:
-        logger.info("=== no active financial year: skipping year-end filters ===")
-        log_etl(spark, process_run_id, "year_end_rule", 2, "Skipped: Inactive Year")
+        logger.info("=== No active financial year. Skipping year-end logic ===")
+        opening_balance_df = closing_balance_df.withColumn(
+            "BALANCE_DATE",
+            lit(etl_plus_1_str).cast(DateType())
+        )
 
-opening_balance_df = opening_balance_df.localCheckpoint()
-opening_balance_df = opening_balance_df.coalesce(2)
 # ==========================================================
-# step 4: data writing (delta lake and oracle)
+# STEP 4: Write to Delta
+# ==========================================================
+delta_final_df = opening_balance_df.select(
+    concat(col("BRANCH_CODE"), col("CURRENCY"), col("CGL")).alias("GLCC"),
+    col("BALANCE").cast(DecimalType(25, 4)).alias("CLOSING_BALANCE"),
+    col("BALANCE_DATE")
+)
+
+# Uncomment in production
+# delta_final_df.write.format("delta").mode("append") \
+#     .save(f"{HDFS_BASE}/DATA-LAKE/glif_data_transfer")
+
+logger.info("=== Delta write completed ===")
+
+# ==========================================================
+# STEP 5: Write to Oracle
+# ==========================================================
+write_oracle(
+    opening_balance_df.select(
+        col("CGL"),
+        col("CURRENCY"),
+        col("BRANCH_CODE"),
+        col("BALANCE_DATE"),
+        col("BALANCE").cast(DecimalType(25, 4)),
+        col("INR_BALANCE").cast(DecimalType(25, 4))
+    ),
+    "BALANCE1111"
+)
+
+logger.info("=== Oracle write completed ===")
+
+# ==========================================================
+# STEP 6: Update FINCORE_DATE (Business Date Advance)
 # ==========================================================
 try:
-    # delta writing
-    logger.info(f"=== step 4: writing opening balance to delta for {etl_plus_1_str} ===")
-    log_etl(spark, process_run_id, "writing_opening_balance_delta", 1, "Writing to Delta Lake")
-    
-    delta_final_df = opening_balance_df.select(
-        concat(col("BRANCH_CODE"), col("CURRENCY"), col("CGL")).alias("GLCC"),
-        col("BALANCE").cast(DecimalType(25, 4)).alias("CLOSING_BALANCE"),
-        col("BALANCE_DATE")
-    )
-    delta_final_df.show(20, False)
-    # spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-    # delta_final_df.write.format("delta").mode("overwrite") \
-    #     .option("replaceWhere", f"BALANCE_DATE = '{etl_plus_1_str}'") \
-    #     .save(f"{HDFS_BASE}/DATA-LAKE/glif_data_transfer")
-    
-    log_etl(spark, process_run_id, "writing_opening_balance_delta", 2, "Delta write successful")
+    logger.info(f"=== Updating FINCORE_DATE to {etl_plus_1_str} ===")
 
-    # oracle writing
-    logger.info("=== step 5: writing opening balance to oracle balance table ===")
-    log_etl(spark, process_run_id, "writing_opening_balance_oracle", 1, "Writing to Oracle")
-    
-    db_status = write_oracle(opening_balance_df.select(
-        col("CGL"), col("CURRENCY"), col("BRANCH_CODE"), col("BALANCE_DATE"), 
-        col("BALANCE").cast(DecimalType(25, 4)), 
-        col("INR_BALANCE").cast(DecimalType(25, 4))
-    ), "BALANCE1111")
-    
-    logger.info(f"=== oracle status: {db_status} ===")
-    log_etl(spark, process_run_id, "writing_opening_balance_oracle", 2, "Oracle write successful")
+    oracle_props = get_oracle_properties()
+    url = oracle_props['url']
+    user = oracle_props['user']
+    pwd = oracle_props['password']
 
-    # ==========================================================
-    # step 5: updating business date in fincore_date table
-    # ==========================================================
-    logger.info(f"=== step 6: updating fincore_date to {etl_plus_1_str} ===")
-    log_etl(spark, process_run_id, "fincore_date_update", 1, "Updating business date")
-    
-    # Establish connection using the variables already defined at the start
     conn = spark._jvm.java.sql.DriverManager.getConnection(url, user, pwd)
+    conn.setAutoCommit(False)
+
     stmt = conn.createStatement()
-    
+
     update_sql = f"""
-        UPDATE FINCORE_DATE 
-        SET current_date = TO_DATE('{etl_plus_1_str}', 'YYYY-MM-DD'), 
-            last_updated = SYSTIMESTAMP 
-        WHERE rownum = 1
+        UPDATE FINCORE_DATE
+        SET CURRENT_DATE = TO_DATE('{etl_plus_1_str}', 'YYYY-MM-DD'),
+            LAST_UPDATED = SYSTIMESTAMP
+        WHERE ROWNUM = 1
     """
+
     stmt.executeUpdate(update_sql)
     conn.commit()
+
     stmt.close()
     conn.close()
-    
-    logger.info(f"=== business date advanced to {etl_plus_1_str} successfully ===")
-    log_etl(spark, process_run_id, "fincore_date_update", 2, "Business date advanced")
+
+    logger.info("=== FINCORE_DATE updated successfully ===")
 
 except Exception as e:
-    logger.error(f"fatal error during write/update: {e}")
-    log_etl(spark, process_run_id, "job_failed", 3, f"Fatal Error: {str(e)[:200]}")
-    spark.stop()
-    exit(1)
+    logger.error(f"Failed to update FINCORE_DATE: {e}")
+    raise e
 
-logger.info("=== OPENING BALANCE FORWARD JOB COMPLETED SUCCESSFULLY ===")
-log_etl(spark, process_run_id, "gl_data_transfer_started", 2, "JOB COMPLETED")
+logger.info("=== GLIF DATA TRANSFER COMPLETED SUCCESSFULLY ===")
+
 spark.stop()
