@@ -1,404 +1,97 @@
-def controllFile(spark,run_id,startTime,HDFS_PATH,logger,etl_date):
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def process_file_wrapper(file_name):
     try:
-        log_etl(spark,"CONTROLL",run_id , "CONTROLL File Reading Started",8,1,startTime)
-        try:
-            df_raw = spark.read.text(f"{HDFS_PATH}/*.log").withColumn("log_file_path", input_file_name())
-        except Exception as e:
-            print(e)
-            log_etl(spark,"CONTROLL",run_id,"ERROR IN READING  CONTROLL FILES: 200 : 74",8,3,startTime)
-            spark.stop()
-            exit()
-        log_etl(spark,"CONTROLL",run_id , "CONTROLL File Reading Completed",9,2,startTime)
-        log_etl(spark,"CONTROLL",run_id , "Analytics on CONTROLL data started",10,2,startTime)
-        df_raw = df_raw.filter(~col("value").rlike("^\\d+\\s+total$"))
-        df_raw = df_raw.withColumn(
-            "log_file_name",
-            element_at(split(col("log_file_path"), "/"), -1)
-        )
-        df_raw = df_raw.withColumn(
-            "region",
-            regexp_extract(col("log_file_name"), r"_([^_]+)_(\d{8})\.log$", 1)
-        ).withColumn(      
-            "run_date",
-            regexp_extract(col("log_file_name"), r"_([^_]+)_(\d{8})\.log$", 2)
-        )
-        # -----------------------------------
-        # 3. SPLIT ROW COUNT & FILE PATH
-        # -----------------------------------
-        df = df_raw.withColumn(
-            "row_count",
-            split(col("value"), r"\s+").getItem(0).cast("int")
-        ).withColumn(
-            "file_path",
-            split(col("value"), r"\s+").getItem(1)
-        ).drop("value")
+        spark = SparkSession.getActiveSession()
+        value = process_single_file_dynamic(spark, file_name)
 
-        # -----------------------------------
-        # 4. EXTRACT BASE FILE NAME
-        # -----------------------------------
-        df = df.withColumn(
-            "base_name",
-            element_at(split(col("file_path"), "/"), -1)
-        )
-        # -----------------------------------
-        # 5. CHECK IF FILE ENDS WITH NUMBER
-        # -----------------------------------
-        df = df.withColumn(
-            "suffix",
-            regexp_extract(col("base_name"), r"_(\d+)$", 1)
-        )
-        df = df.withColumn(
-            "prefix",
-            when(col("suffix") != "",
-                regexp_replace(col("base_name"), r"_(\d+)$", "")
-            ).otherwise(col("base_name"))
-        )
-        # -----------------------------------
-        # 6. BUILD UPDATED FILE NAME
-        # -----------------------------------
-        df_final = df.withColumn(
-            "updated_file_name",
-            when(
-                col("suffix") != "",
-                concat_ws("_", col("prefix"), col("run_date"), col("region"), col("suffix"))
-            ).otherwise(
-                concat_ws("_", col("prefix"), col("run_date"), col("region"))
-            )
-        )
-
-        # -----------------------------------
-        # 7. FINAL RESULT
-        # -----------------------------------
-        result_df = df_final.select("updated_file_name", "row_count") \
-            .withColumnRenamed("updated_file_name", "FILE_NAME") \
-            .withColumnRenamed("row_count", "HDFS_ROW_COUNT") \
-            .withColumn("FILE_TYPE", when(lower(col("FILE_NAME")).startswith("glif"), "GLIF").otherwise("CBS")) \
-            .withColumn("ETL_DATE", lit(etl_date))   
-        return result_df
+        return {
+            "file_name": file_name,
+            "value": value,
+            "error": None
+        }
     except Exception as e:
-        print(e)
-        logger.info(f"Error processing CONTROLL", exc_info=True)
-        log_etl(spark,"CONTROLL",run_id ,"ERROR IN Analytics on CONTROLL data: 201 : 91",10,3,startTime)
-        spark.stop()
-        exit()
-        
-def create_manifest(spark, filename, manifest_base, etl_date, content):
-
-    # Format date
-    if isinstance(etl_date, str):
-        etl_date_str = etl_date
-    else:
-        etl_date_str = etl_date.strftime("%Y%m%d")
-
-    # Final manifest folder
-    final_manifest_dir = f"{manifest_base.rstrip('/')}/{etl_date_str}"
-
-    print("Final Manifest Path:", final_manifest_dir)
-
-    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-    Path = spark._jvm.Path
-
-    hdfs_dir = Path(final_manifest_dir)
-
-    # Create ETL folder if not exists
-    if not fs.exists(hdfs_dir):
-        print("Creating ETL folder:", final_manifest_dir)
-        fs.mkdirs(hdfs_dir)
-
-    # Write locally
-    with open(filename, "w") as f:
-        f.write(content)
-
-    dest_path = Path(f"{final_manifest_dir}/{filename}")
-
-    fs.copyFromLocalFile(
-        False,
-        True,
-        Path(filename),
-        dest_path
-    )
-
-    if not fs.exists(dest_path):
-        raise RuntimeError(f"Manifest NOT written: {dest_path}")
-
-    print("Manifest successfully created at:", dest_path)
-
-
-
-def check_and_stop_spark(spark,typeToRead,run_id, failedFiles, count_holder, etl_date):
-    """
-    Check if all records for given ETL_DATE have DATA_LAKE_COUNT populated.
-    If yes, stop Spark.
-    """
-    try:
-        # Read control table
-        query = f"""(SELECT * FROM CONTROLL_FILE_MASTER where FILE_TYPE = '{typeToRead}') t"""
-        df = read_oracle(spark,query) 
-        
-        # Filter by ETL_DATE
-        df_filtered = df.filter(col("ETL_DATE") == etl_date)
-        df_filtered.show(20,truncate=False)
-        print("aaaaaaaa ",typeToRead)
-        # Count total and completed
-        total = df_filtered.count()
-        # completed = df_filtered.filter(col("DATA_LAKE_COUNT").isNotNull()).count()
-        completed =df_filtered.filter(col("DATA_LAKE_STATUS")=='YES').count()
-
-        print(f"ETL Date {etl_date}: {completed}/{total} files completed")
-
-        if total > 0 and completed == total :
-            print("All files processed. Stopping Spark...")
-            cfg = paths_for_read(typeToRead, etl_date, etl_date.strftime("%Y-%m-%d"))
-            manifest_base = cfg["MANIFEST_BASE_PATH"]
-            manifest_file = f"{typeToRead.upper()}_alldata_successfull_{run_id}_Manifest.txt"
-            required_date = etl_date.strftime("%Y-%m-%d")
-            create_manifest(
-                spark,
-                manifest_file,
-                manifest_base,
-                etl_date,
-                f"{typeToRead.upper()} | WHOLE DATA SUCCESSFULY LOADED | DATE={required_date}"
-            )
-            if(count_holder[0]>1):
-                log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started",2,f"{typeToRead} pipeline completed successfully")
-            else:
-                log_etl(spark, process_run_id, f"{typeToRead}_error_files",2,f"All files successfully processed.")
-                log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started",2,f"{typeToRead} pipeline completed successfully")
-
-            spark.stop()
-            os._exit(0) 
-        else:
-            print("Waiting for more files...")
-    except Exception as e:
-        print(f"Error in check_and_stop_spark: {e}")
+        return {
+            "file_name": file_name,
+            "value": None,
+            "error": str(e)
+        }
 
 
 def process_ready_files(batch_df, batch_id):
-    global typeToRead ,run_id ,process_run_id, failedFiles ,count_holder
-    print(f"Batch {batch_id} received with {batch_df.count()} rows")  # Debug: always print if batch arrives
-    # data1 = dfnew.select("control_status").collect()
-    # print("data1", data1)
-    all_files = batch_df.filter(col("final_status") == "READY").select("file_name", "final_status").collect()
-    print(f"All files: {[(r['file_name'], r['final_status']) for r in all_files]}")
+    global typeToRead, run_id, process_run_id, failedFiles, count_holder
 
-    ready_files = batch_df.select("file_name").collect()
-    print("aaaaaaaaaa", ready_files)
-    # batch_df.show(truncate=False)    # This will now show even if empty
+    print(f"Batch {batch_id} received")
+
     spark = batch_df.sparkSession
-    if len(ready_files) == 0:
+
+    # ✅ Filter READY files
+    ready_files = [
+        row["file_name"]
+        for row in batch_df
+        .filter(col("final_status") == "READY")
+        .select("file_name")
+        .collect()
+    ]
+
+    if not ready_files:
         print("No READY files in this batch.")
         return
+
+    print(f"Processing {len(ready_files)} files in parallel")
+
     producer = Producer({"bootstrap.servers": get_kafka_ip()})
-    for row in ready_files:
-        filenametemp = row["file_name"].replace(".gz", "")
-        parts = filenametemp.split("_")
-        file_code = parts[0]+parts[2] 
-        try:
-            value = process_single_file_dynamic(spark, row["file_name"])
-            message = {
-                "file_name": row["file_name"].replace(".gz", ""),
-                "value": value,
-                "etl_date":get_etl_date(spark).strftime("%d-%m-%Y")
-            }
-            
-            # Send the message to Kafka
-            producer.produce(
-                topic="allfiletodatalake", 
-                value=json.dumps(message)  # Serialize the dict to a JSON string
-            )
-        except Exception as e:
-            logger.info(f"Error in ETL Pipeline  {e}")
-            failedFiles.append(f"{file_code}")
-            log_etl(spark, process_run_id, f"{typeToRead}_error_files",3,f"Error in {typeToRead} files to read : {failedFiles}")
-            count_holder[0] += 1
-    producer.flush()
-    check_and_stop_spark(spark,typeToRead,run_id, failedFiles, count_holder, get_etl_date(spark))
-def main(args,typeToRead,HDFS_BASE,spark,today,spark_date,PROCESS_ID,run_id,logger,count_holder,failedFiles,process_run_id):
-    
-    try:
-        startTime= datetime.now()
-        #============================ CONFIG & DATE ============================
-        oracle_properties=get_oracle_properties()
-        # print(oracle_properties)
-        
-        print("bbbbb",today)
-        yesterday = today - timedelta(days=1)
-        
-        posting_date_str = today.strftime("%Y-%m-%d")
-        today_str = today.strftime("%Y%m%d")
-        
-        yesterday=yesterday.strftime("%Y-%m-%d")
- 
-        print(f"=== Using current date for POST_DATE: {posting_date_str} ===")
 
-        JDBC_URL = oracle_properties["url"]
-        ORACLE_USER = oracle_properties["user"]
-        ORACLE_PASSWORD = oracle_properties["password"]
-        ORACLE_DRIVER = oracle_properties["driver"]
-               
-        RECON_DATE = today.strftime("%Y-%m-%d")
-        etl_date_str = today.strftime("%Y-%m-%d")
-             
-        HDFS_PATH=""
-        checkpt=""
-        PROCESS_ID = 0
-        
-        if(typeToRead=="GLIF"):
+    # ✅ Parallel execution
+    max_workers = min(8, len(ready_files))  # safe limit
 
-            hdfs_paths = paths_for_read("gliftotalfiles", today, today_str)
-            HDFS_PATH = hdfs_paths["HDFS_PATH"]
-            checkpt = f"{hdfs_paths['checkpt']}/{run_id}"
-            print("aaaaa ",HDFS_PATH)
-            # PROCESS_ID = getattr(constants,"GLIF_ALL_DATA",10)
-            # TABLES = tables_to_read("controll")
-            # CONTROLL = TABLES["CONTROLL_FILE_MASTER"]
-        else: 
-            hdfs_paths = paths_for_read("cbstotalfiles", today, today_str)
-            HDFS_PATH = hdfs_paths["HDFS_PATH"]
-            
-            checkpt = f"{hdfs_paths['checkpt']}/{run_id}"
-            # PROCESS_ID = getattr(constants,"CBS_ALL_DATA",11)        
-        # try:
-        print("function called")
-        
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(process_file_wrapper, file): file
+            for file in ready_files
+        }
 
+        for future in as_completed(futures):
+            result = future.result()
+            file_name = result["file_name"]
 
-        log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started",1,f"{typeToRead} pipeline started.")
-        log_etl(spark, process_run_id, f"{typeToRead}_error_files",1,f"{typeToRead} pipeline error files.")
-        if(run_id>1):
             try:
-                log_etl(spark, process_run_id, "bulk_datalake_deletion", 1, "bulk_datalake deletion started")
-                
-                # 1. Register the Hadoop classes in your Python environment
-                java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-                java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-                
-                # 2. Initialize the FileSystem object
-                conf = spark._jsc.hadoopConfiguration()
-                fs = spark._jvm.FileSystem.get(conf)
-                
-                # 3. Define the path to delete
-                base_delta_path = get_delta_path_by_file_type("glif", etl_date_str)
-                delete_path = spark._jvm.Path(base_delta_path)
-                
-                # 4. Check existence and delete (True for recursive)
-                if fs.exists(delete_path):
-                    fs.delete(delete_path, True)
-                    log_etl(spark, process_run_id, "bulk_datalake_deletion", 2, "Bulk datalake deletion success")
-                
+                if result["error"]:
+                    raise Exception(result["error"])
+
+                message = {
+                    "file_name": file_name.replace(".gz", ""),
+                    "value": result["value"],
+                    "etl_date": get_etl_date(spark).strftime("%d-%m-%Y")
+                }
+
+                producer.produce(
+                    topic="allfiletodatalake",
+                    value=json.dumps(message)
+                )
 
             except Exception as e:
-                log_etl(spark, process_run_id, "bulk_datalake_deletion", 3, "Bulk datalake deletion failed")
-                spark.stop()
-                sys.exit(1)
-            # try:
-            #     log_etl(spark, process_run_id, "checkptdeletion", 1, "Check point deletion started")
-                
-            #     # 1. Register the Hadoop classes in your Python environment
-            #     java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-            #     java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-                
-            #     # 2. Initialize the FileSystem object
-            #     conf = spark._jsc.hadoopConfiguration()
-            #     fs = spark._jvm.FileSystem.get(conf)
-                
-            #     # 3. Define the path to delete
-            #     delete_path = spark._jvm.Path(checkpt)
-                
-            #     # 4. Check existence and delete (True for recursive)
-            #     if fs.exists(delete_path):
-            #         fs.delete(delete_path, True)
-            #         log_etl(spark, process_run_id, "checkptdeletion", 2, "Check point deletion success")
+                file_code = file_name.split("_")[0]
+                failedFiles.append(file_code)
 
-            # except Exception as e:
-            #     log_etl(spark, process_run_id, "checkptdeletion", 3, "Check point deletion failed")
-            #     spark.stop()
-            #     sys.exit(1)
-        log_etl(spark, process_run_id, "source_dir_check", 1, f"checking if source dir : {HDFS_PATH} exists")
-        if not create_hdfs_dir(spark, HDFS_PATH, logger=logger):
-            log_etl(spark, process_run_id, "source_dir_check", 3, f"Could not create or find path: {HDFS_PATH}")
-            spark.stop()
-            os._exit(1)
-        log_etl(spark, process_run_id, "source_dir_check", 2, f"Source dir : {HDFS_PATH} exists")
-        binary_schema = StructType([
-            StructField("path", StringType(), True),
-            StructField("modificationTime", TimestampType(), True),
-            StructField("length", LongType(), True),
-            StructField("content", BinaryType(), True)
-        ])
-        # Read the stream with explicit schema
-        file_extension = "*.gz" if typeToRead == "GLIF" else "*.gz"
-        file_stream = spark.readStream \
-            .format("binaryFile") \
-            .schema(binary_schema) \
-            .option("pathGlobFilter", file_extension) \
-            .load(HDFS_PATH)
-        file_stream = file_stream.withColumn(
-            "full_file_name",
-            regexp_extract(col("path"), r"([^/]+)$", 1)
-        )
-        # Step 2: Now remove the .txt.gz extension
-        file_stream = file_stream.withColumn(
-            "file_name",
-            regexp_replace(col("full_file_name"), r"\.txt\.gz$", "")
-        )
+                log_etl(
+                    spark,
+                    process_run_id,
+                    f"{typeToRead}_error_files",
+                    3,
+                    f"Error in file {file_name}"
+                )
 
-        # -------------------------------------------------
-        # 2. CONTROL FILE MASTER CHECK
-        # -------------------------------------------------
-        print("controll came here 1")
-        formatted_date = today.strftime('%Y-%m-%d')
-        Controll_query = f"""(SELECT FILE_NAME AS file_name, ETL_DATE FROM CONTROLL_FILE_MASTER WHERE TO_CHAR(ETL_DATE, 'DD-MM-YY') = '{today.strftime('%d-%m-%y')}') a"""
-        control_df = read_oracle(spark,Controll_query)
-        
-        df = file_stream.join(control_df, "file_name", "left") \
-            .withColumn("control_status",
-                when(col("FILE_NAME").isNull(), "NOT_IN_CONTROL").otherwise("OK")
-            )
-   
- 
-        print("controll came here 2")
-        
-        print("controll came here 4")
-        df = df.withColumn("final_status",
-                when(col("control_status") != "OK", col("control_status"))
-            #  .when(col("FILE_STATUS") != "OK", col("FILE_STATUS"))
-            #  .when(col("stream_status") != "OK", col("stream_status"))
-                .otherwise("READY")
-        )
-        
-        query = df.writeStream \
-            .outputMode("append") \
-            .foreachBatch(process_ready_files) \
-            .option("checkpointLocation",checkpt) \
-            .start()
-        query.awaitTermination()   
-        logger.info(f"Final aggregation completed successfully")
-    except Exception as e:
-        logger.info(f"Error in ETL Pipeline  {e}")
-        log_etl(spark, process_run_id, f"{typeToRead}_error_files",3,f"Error in  files to read ")
-        log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started",3,f"Error in {typeToRead} pipeline.")
-        spark.stop()
-        os._exit(1)
-    
-if __name__ == "__main__":
-    typeToRead="GLIF"
-    count_holder = [0]
-    HDFS_BASE = get_hdfs_base()
-    failedFiles = []
-    spark = create_spark_session("Controll File", HDFS_BASE)
-    today = get_etl_date(spark)
-    spark_date = today.strftime("%Y-%m-%d")
-    if(typeToRead=="GLIF"):
-        PROCESS_ID = Process.GLIF_ALL_DATA
-    else:
-        PROCESS_ID = Process.CBS_ALL_DATA
-    run_id = get_run_id(spark,today.strftime("%Y-%m-%d"),PROCESS_ID)
-    logger = setup_logger(typeToRead,spark_date,run_id)
-    process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today.strftime("%Y-%m-%d"))
-    main(sys.argv,typeToRead,HDFS_BASE,spark,today,spark_date,PROCESS_ID,run_id,logger,count_holder,failedFiles,process_run_id)
- 
+                count_holder[0] += 1
 
+    producer.flush()
+
+    # ✅ Final completion check
+    check_and_stop_spark(
+        spark,
+        typeToRead,
+        run_id,
+        failedFiles,
+        count_holder,
+        get_etl_date(spark)
+    )
