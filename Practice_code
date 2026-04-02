@@ -1,23 +1,122 @@
-files = files_to_read(spark,"glif")
-print(files)
-file_types_with_extra = files["stream_files"]
-file_types_without_extra = files["non_stream_files"]
+logger.info(f"ETL date : {today}")
+logger.info(f"Oracle properties fetched successfully")
 
-paths_to_read = [f"{HDFS_PATH}*{ft}_[0-9][0-9][0-9]*.gz" for ft in file_types_with_extra]
-paths_to_read.extend([f"{HDFS_PATH}*{ft}.gz" for ft in file_types_without_extra])
+# ===================================================================================
+#   GLIF DELETION LOGIC (UNCHANGED)
+# ===================================================================================
 
+if(RUN_ID>1):
+    log_etl(spark, process_run_id, "GLIF_deletion_oracle", 1, "In GLIF deletion started")
+    try:
+        oracle_properties=get_oracle_properties()
 
+        oracle_url = oracle_properties["url"]
+        oracle_user = oracle_properties["user"]
+        oracle_password = oracle_properties["password"]
+
+        conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
+            oracle_url, oracle_user, oracle_password
+        )
+
+        sql_query=f"""
+        Delete from {BALANCE} where BALANCE_DATE = to_date('{posting_date_str}','yyyy-mm-dd')
+        """
+
+        conn.setAutoCommit(False)
+        statement = conn.createStatement()
+        statement.execute(sql_query)
+        conn.commit()
+
+        logger.info(f"Deleted from GLIF table successfully")
+        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 2, "In GLIF deletion success")
+
+    except Exception as e:
+        logger.error(f"error {e} while deleting from GLIF table")
+        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 3, "In GLIF deletion failed")
+        spark.stop()
+        sys.exit(1)
+
+    try:
+        oracle_properties=get_oracle_properties()
+
+        oracle_url = oracle_properties["url"]
+        oracle_user = oracle_properties["user"]
+        oracle_password = oracle_properties["password"]
+
+        conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
+            oracle_url, oracle_user, oracle_password
+        )
+
+        sql_query=f"""
+        DELETE FROM {TRANSACTIONS}
+        WHERE TRANSACTION_DATE = TO_DATE('{posting_date_str}', 'yyyy-mm-dd')
+          AND SOURCE_FLAG IN ('C', 'F', 'P', 'T', 'V')
+        """
+
+        conn.setAutoCommit(False)
+        statement = conn.createStatement()
+        statement.execute(sql_query)
+        conn.commit()
+
+        logger.info(f"Deleted from TRANSACTIONS successfully")
+        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 2, "In GLIF deletion success")
+
+    except Exception as e:
+        logger.error(f"error {e} while deleting from TRANSACTIONS")
+        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 3, "In GLIF deletion failed")
+        spark.stop()
+        sys.exit(1)
+
+    try:
+        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 1, "In GLIF deletion datalake started")
+
+        delta_table = DeltaTable.forPath(spark, GL_DATALAKE_PATH)
+        delta_table.delete(f"BALANCE_DATE = '{posting_date_str}'")
+
+        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 2, "Difference deletion datalake completed")
+
+    except Exception as e:
+        logger.info(f"Error during deletion in datalake {e}")
+        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 3, "Error in Difference deletion")
+        spark.stop()
+        sys.exit(1)
+
+# ===================================================================================
+#   ✅ READ RAW GLIF FILES FROM HDFS (REPLACED DELTA LOGIC)
+# ===================================================================================
 
 logger.info(f"ETL date : {today}")
 logger.info(f"Oracle properties fetched successfully")
-logger.info(f"Oracle properties fetched successfully")
 
-df_raw = read_patterns(spark,paths_to_read,posting_date_str,RUN_ID)
+files = files_to_read(spark, "glif")
+logger.info(files)
+
+file_types_with_extra = files["stream_files"]
+file_types_without_extra = files["non_stream_files"]
+
+paths_to_read = [
+    f"{HDFS_PATH}*{ft}_[0-9][0-9][0-9]*.gz"
+    for ft in file_types_with_extra
+]
+
+paths_to_read.extend([
+    f"{HDFS_PATH}*{ft}.gz"
+    for ft in file_types_without_extra
+])
+
+logger.info(f"Reading Patterns")
+
+df_raw = read_patterns(spark, paths_to_read, posting_date_str, RUN_ID)
+
+# ===================================================================================
+#   REST OF YOUR PIPELINE (UNCHANGED)
+# ===================================================================================
 
 df_processed = df_raw.withColumns({
     "Id": expr("substring(value, 51, 18)"),
     "currency_code": expr("substring(value, 48, 3)")
 })
+
 df_clean = df_processed.withColumns({
     "Amount_raw": when(col("currency_code") != "INR", expr("substring(value, 133, 17)"))
                  .otherwise(expr("substring(value, 116, 17)")),
@@ -39,28 +138,31 @@ digit_map = create_map(
 
 df_with_signed_amount = df_clean.withColumns({
     "last_digit": digit_map.getItem(col("sign_char")),
-    "sign": when(col("sign_char").isin(['p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y']), -1).otherwise(1)
+    "sign": when(col("sign_char").isin(['p','q','r','s','t','u','v','w','x','y']), -1).otherwise(1)
 })
+
 df_with_signed_amount = df_with_signed_amount.withColumn(
     "Amount_decimal_str",
     concat(col("Amount_base"), col("last_digit"))
 )
+
 df_final = df_with_signed_amount.withColumns({
     "Amount_final": (col("Amount_decimal_str").cast(DecimalType(25,4)) / 1000) * col("sign")
 })
+
 df_with_signed_amount = df_final.withColumns({
     "Amountpve": when(df_final["Amount_final"] > 0, df_final["Amount_final"]).otherwise(0),
     "Amountnve": when(df_final["Amount_final"] < 0, df_final["Amount_final"]).otherwise(0)
 })
+
 df_agg = df_with_signed_amount.groupBy("Id").agg(
     F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
     F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
     F.count(F.col("Id")).alias("TRANSACTION_COUNT")
 )
-# df_agg.show()
+
 df_mapped = df_agg.withColumns({ 
-    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()), 
-    # "TRANSACTION_DATE": F.to_date(F.lit(posting_date_str)),
+    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()),
     "JOURNAL_ID": lit(None).cast(StringType()),
     "BRANCH_CODE": substring(col("Id"), 1, 5),
     "CURRENCY": substring(col("Id"), 6, 3),
@@ -82,4 +184,4 @@ df_final_schema = df_mapped.select(
     "SOURCE_FLAG"
 )
 
-df_final_schema.persist()
+df_final_schema.cache()
