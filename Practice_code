@@ -1,187 +1,304 @@
-logger.info(f"ETL date : {today}")
-logger.info(f"Oracle properties fetched successfully")
+#ETL+1 pipeline
 
-# ===================================================================================
-#   GLIF DELETION LOGIC (UNCHANGED)
-# ===================================================================================
 
-if(RUN_ID>1):
-    log_etl(spark, process_run_id, "GLIF_deletion_oracle", 1, "In GLIF deletion started")
+import sys
+from datetime import datetime, timedelta
+from pyspark.sql import functions as F
+from pyspark.sql.functions import col, lit, concat, substring
+from pyspark.sql.types import DateType, DecimalType
+from common.log_etl_modified import log_etl
+from common.logger import setup_logger
+from common.properties import get_oracle_properties
+from common.dateUtil import get_etl_date
+from common.fileUtil import paths_for_read
+from common.processRun import get_run_id, get_process_run_id
+from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base
+from common.fileUtil import tables_to_read
+from common.read_write_oracle import read_oracle, write_oracle
+from common.constants import Process
+# ==========================================================
+# Spark & ETL setup
+# ==========================================================
+HDFS_BASE = get_hdfs_base()
+spark = create_spark_session("GLIF_Transfer[ETL+1]_PIPELINE", HDFS_BASE)
+
+# db_date_str = "28-FEB-26"
+# today = datetime.strptime(db_date_str, "%d-%b-%y")
+# etl_plus_1_date = today + timedelta(days=1)
+# posting_date_str = today.strftime("%Y-%m-%d")        # "2025-11-21"
+# etl_plus_1_str = etl_plus_1_date.strftime("%Y-%m-%d") # "2025-11-22"
+
+today = get_etl_date(spark)
+etl_plus_1_date = today + timedelta(days=1)
+
+posting_date_str = today.strftime("%Y-%m-%d")
+etl_plus_1_str = etl_plus_1_date.strftime("%Y-%m-%d")
+
+PROCESS_ID = Process.ETL_PLUS_ONE
+RUN_ID = get_run_id(spark, posting_date_str, PROCESS_ID)
+logger = setup_logger("GLIF_DATA_TRANSFER", RUN_ID, posting_date_str)
+
+process_run_id = (
+    sys.argv[1] if len(sys.argv) > 1
+    else get_process_run_id(spark, PROCESS_ID, posting_date_str)
+)
+
+logger.info(f"=== GLIF DATA TRANSFER STARTED FOR {posting_date_str} ===")
+log_etl(spark, process_run_id, "gl_data_transfer_started", 1, "JOB STARTED")
+
+hdfs_paths = paths_for_read("glif",today,posting_date_str)
+GL_DATALAKE_PATH = hdfs_paths["GL_DATALAKE_PATH"]
+oracle_tables = tables_to_read("glif")
+TRANSACTIONS = oracle_tables["TRANSACTIONS"]
+BALANCE = oracle_tables["BALANCE"]
+
+
+
+# ==========================================================
+# STEP 1: Read closing balance
+# ==========================================================
+log_etl(spark, process_run_id, "reading_closing_balance", 1, "Reading from GL BALANCE")
+gl_balance_query = f"""
+(
+    SELECT CGL, CURRENCY, BRANCH_CODE, BALANCE, INR_BALANCE
+    FROM {BALANCE}
+    WHERE BALANCE_DATE = TO_DATE('{posting_date_str}', 'YYYY-MM-DD')
+) T1
+"""
+# gl_balance_query = f"""
+# (
+#     SELECT CGL, CURRENCY, BRANCH_CODE, BALANCE, INR_BALANCE
+#     FROM GL_BALANCE
+#     WHERE BALANCE_DATE = (SELECT MAX(BALANCE_DATE) FROM GL_BALANCE)
+# ) T1
+# """
+try:
+    logger.info(f"=== step 1: reading closing balance for {posting_date_str} ===")
+    log_etl(spark, process_run_id, "reading_closing_balance", 1, "Reading from GLIF Delta Lake")
+    path_config = paths_for_read("glif", today, posting_date_str)
+    gl_delta_path = path_config["GL_DATALAKE_PATH"]
+    closing_balance_df = spark.read.format("delta").load(gl_delta_path) \
+    .filter(col("BALANCE_DATE") == lit(posting_date_str)).withColumns({ 
+        "BRANCH_CODE": substring(col("glcc"), 1, 5),
+        "CURRENCY": substring(col("glcc"), 6, 3),
+        "CGL": substring(col("glcc"), 9, 10),
+    }).select("BRANCH_CODE","CURRENCY","CGL","BALANCE_DATE",col("CLOSING_BALANCE").alias("BALANCE"),"INR_BALANCE")
+    logger.info(f"=== closing balance read successfully.")
+    log_etl(spark, process_run_id, "reading_closing_balance", 2, f"Read records from Delta")
+
+except Exception as e:
+    print(f"Error {e} while fetching data from {BALANCE} Table")
+    # ==========================================================
+    # Reading closing balance from GLIF DELTA LAKE
+    # ==========================================================
     try:
-        oracle_properties=get_oracle_properties()
+        closing_balance_df = read_oracle(spark, gl_balance_query)
+        log_etl(spark, process_run_id, "reading_closing_balance", 2, "Reading from GL BALANCE")
 
-        oracle_url = oracle_properties["url"]
-        oracle_user = oracle_properties["user"]
-        oracle_password = oracle_properties["password"]
+    except Exception as e:
+        logger.error(f"error reading closing balance: {e}")
+        log_etl(spark, process_run_id, "reading_closing_balance", 3, "Error reading from Delta")
+        spark.stop()
+        exit(1)
 
-        conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
-            oracle_url, oracle_user, oracle_password
+closing_balance_df.cache()
+# ==========================================================
+# STEP 2: Normal day fast path
+# ==========================================================
+is_year_end = (today.month == 3 and today.day == 31)
+
+
+if not is_year_end:
+
+    logger.info("=== Normal day processing ===")
+    log_etl(spark, process_run_id, "creating_opening_bal", 1, "Creating opening balance")
+    opening_balance_df = closing_balance_df.withColumn(
+        "BALANCE_DATE",
+        lit(etl_plus_1_str).cast(DateType())
+    )
+    log_etl(spark, process_run_id, "creating_opening_bal", 2, "Opening balance created")
+
+# ==========================================================
+# STEP 3: Year-end logic (only on March 31)
+# ==========================================================
+else:
+    logger.info("=== Year-end detected ===")
+    try:
+        cal_active_df = read_oracle(spark, "(SELECT 1 FROM CALENDER_CONFIG WHERE ACTIVE_FLAG = 1) T1")
+        if cal_active_df.isEmpty():
+            print(f"Calander config has to be updated.")
+            spark.stop()
+            sys.exit(1)
+    except Exception as e:
+        print(f"Error {e} while loading cal_active_df from CALENDER_CONFIG Table")
+
+    if not cal_active_df.isEmpty():
+        logger.info("=== Active financial year found ===")
+        log_etl(spark, process_run_id, "year_end_rule", 1, "Active financial year found")
+        log_etl(spark, process_run_id, "creating_opening_bal", 1, "Creating opening balance")
+
+        # Base Data: Setting the new date
+        base_df = closing_balance_df.withColumn("BALANCE_DATE", lit(etl_plus_1_str).cast("date"))
+        base_df.cache()
+        # 1. Load Masters for Filtering
+        cgl_master_df = read_oracle(spark, "(SELECT CGL_NUMBER FROM CGL_MASTER WHERE BAL_FWD = 1) T1")
+        circle_master_df = read_oracle(spark, "(SELECT DISTINCT BRANCH_CODE FROM CIRCLE_MASTER WHERE BRANCH_CODE IS NOT NULL) T1")
+
+        # 2. Only keeping CGLs where BAL_FWD = 1
+        # Doing this first to ensure no other logic runs on excluded CGLs
+        fwd_base_df = base_df.join(F.broadcast(cgl_master_df), 
+                                    F.trim(F.col("CGL")) == F.trim(F.col("CGL_NUMBER")), 
+                                    "inner").select(base_df.columns)
+
+        
+        # ---  CGL 5000000000 RULE ---
+        rule_78_base = base_df.filter(F.col("CGL").rlike("^[78]"))
+        original_78 = rule_78_base.filter(F.trim(F.col("CURRENCY")) != "INR").distinct()
+
+        # Creating the INR Offset rows
+        offset_78 = original_78.withColumn("CURRENCY", F.lit("INR")) \
+                                .withColumn("BALANCE", F.negate(F.col("INR_BALANCE"))) \
+                                .withColumn("INR_BALANCE", F.negate(F.col("INR_BALANCE")))
+        
+        
+        
+        # ---  CGL 7 & 8 RULE ---
+        rule_78_base = base_df.filter(F.col("CGL").rlike("^[78]"))
+        original_78 = rule_78_base.filter(F.trim(F.col("CURRENCY")) != "INR").distinct()
+
+        # Creating the INR Offset rows
+        offset_78 = original_78.withColumn("CURRENCY", F.lit("INR")) \
+                                .withColumn("BALANCE", F.negate(F.col("INR_BALANCE"))) \
+                                .withColumn("INR_BALANCE", F.negate(F.col("INR_BALANCE")))
+
+        # Union (1 Foreign + 1 INR = 2 rows)
+        df_78_final = original_78.unionByName(offset_78)
+
+        # --- CGL 2110505001 rule (Circle Branches) ---
+        # Now automatically respects BAL_FWD=1 because it uses fwd_base_df
+        df_circle_final = fwd_base_df.filter(F.col("CGL") == "2110505001") \
+                                        .join(F.broadcast(circle_master_df), "BRANCH_CODE", "inner")
+        
+        # --- General rule ---
+        # Excluding the 7/8 and Circle CGLs
+        df_general_final = fwd_base_df.filter(
+            (~(F.col("CGL").cast("string").rlike("^[78]"))) & 
+            (F.col("CGL").cast("string") != "2110505001")
         )
+        
 
-        sql_query=f"""
-        Delete from {BALANCE} where BALANCE_DATE = to_date('{posting_date_str}','yyyy-mm-dd')
-        """
+        # --- Final union ---
+        common_cols = ["CGL", "CURRENCY", "BRANCH_CODE", "BALANCE_DATE", "BALANCE", "INR_BALANCE"]
+            
+        opening_balance_df = df_78_final.select(*common_cols) \
+                                .unionByName(df_circle_final.select(*common_cols)) \
+                                .unionByName(df_general_final.select(*common_cols))
+        opening_balance_df.cache()
 
-        conn.setAutoCommit(False)
-        statement = conn.createStatement()
-        statement.execute(sql_query)
-        conn.commit()
+        # opening_balance_df.show(200, False)
+        log_etl(spark, process_run_id, "creating_opening_bal", 2, "Opening balance created")
+    else:
+        logger.info("=== No active financial year. Skipping ===")
+        log_etl(spark, process_run_id, "year_end_rule", 1, "Skipped: Inactive Year")
 
-        logger.info(f"Deleted from GLIF table successfully")
-        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 2, "In GLIF deletion success")
+        
+# ==========================================================
+# STEP 4: Writing to Delta
+# ==========================================================
+logger.info(f"=== Writing opening balance to delta for {etl_plus_1_str} ===")
+log_etl(spark, process_run_id, "writing_opening_balance_delta", 1, "Writing to Delta Lake")
 
-    except Exception as e:
-        logger.error(f"error {e} while deleting from GLIF table")
-        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 3, "In GLIF deletion failed")
-        spark.stop()
-        sys.exit(1)
-
-    try:
-        oracle_properties=get_oracle_properties()
-
-        oracle_url = oracle_properties["url"]
-        oracle_user = oracle_properties["user"]
-        oracle_password = oracle_properties["password"]
-
-        conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
-            oracle_url, oracle_user, oracle_password
-        )
-
-        sql_query=f"""
-        DELETE FROM {TRANSACTIONS}
-        WHERE TRANSACTION_DATE = TO_DATE('{posting_date_str}', 'yyyy-mm-dd')
-          AND SOURCE_FLAG IN ('C', 'F', 'P', 'T', 'V')
-        """
-
-        conn.setAutoCommit(False)
-        statement = conn.createStatement()
-        statement.execute(sql_query)
-        conn.commit()
-
-        logger.info(f"Deleted from TRANSACTIONS successfully")
-        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 2, "In GLIF deletion success")
-
-    except Exception as e:
-        logger.error(f"error {e} while deleting from TRANSACTIONS")
-        log_etl(spark, process_run_id, "GLIF_deletion_oracle", 3, "In GLIF deletion failed")
-        spark.stop()
-        sys.exit(1)
-
-    try:
-        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 1, "In GLIF deletion datalake started")
-
-        delta_table = DeltaTable.forPath(spark, GL_DATALAKE_PATH)
-        delta_table.delete(f"BALANCE_DATE = '{posting_date_str}'")
-
-        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 2, "Difference deletion datalake completed")
-
-    except Exception as e:
-        logger.info(f"Error during deletion in datalake {e}")
-        log_etl(spark, process_run_id, "GLIF_deletion_datalake", 3, "Error in Difference deletion")
-        spark.stop()
-        sys.exit(1)
-
-# ===================================================================================
-#   ✅ READ RAW GLIF FILES FROM HDFS (REPLACED DELTA LOGIC)
-# ===================================================================================
-
-logger.info(f"ETL date : {today}")
-logger.info(f"Oracle properties fetched successfully")
-
-files = files_to_read(spark, "glif")
-logger.info(files)
-
-file_types_with_extra = files["stream_files"]
-file_types_without_extra = files["non_stream_files"]
-
-paths_to_read = [
-    f"{HDFS_PATH}*{ft}_[0-9][0-9][0-9]*.gz"
-    for ft in file_types_with_extra
-]
-
-paths_to_read.extend([
-    f"{HDFS_PATH}*{ft}.gz"
-    for ft in file_types_without_extra
-])
-
-logger.info(f"Reading Patterns")
-
-df_raw = read_patterns(spark, paths_to_read, posting_date_str, RUN_ID)
-
-# ===================================================================================
-#   REST OF YOUR PIPELINE (UNCHANGED)
-# ===================================================================================
-
-df_processed = df_raw.withColumns({
-    "Id": expr("substring(value, 51, 18)"),
-    "currency_code": expr("substring(value, 48, 3)")
-})
-
-df_clean = df_processed.withColumns({
-    "Amount_raw": when(col("currency_code") != "INR", expr("substring(value, 133, 17)"))
-                 .otherwise(expr("substring(value, 116, 17)")),
-    "last_char": when(col("currency_code") != "INR", expr("substring(value, 149, 1)"))
-                 .otherwise(expr("substring(value, 132, 1)"))
-}).drop("value", "currency_code")
-
-df_clean = df_clean.withColumns({
-    "Amount_base": substring(col("Amount_raw"), 1, 16),
-    "sign_char": substring(col("Amount_raw"), 17, 1)
-})
-
-digit_map = create_map(
-    lit('1'), lit('1'), lit('2'), lit('2'), lit('3'), lit('3'), lit('4'), lit('4'), lit('5'), lit('5'),
-    lit('6'), lit('6'), lit('7'), lit('7'), lit('8'), lit('8'), lit('9'), lit('9'), lit('0'), lit('0'),
-    lit('p'), lit('0'), lit('q'), lit('1'), lit('r'), lit('2'), lit('s'), lit('3'), lit('t'), lit('4'),
-    lit('u'), lit('5'), lit('v'), lit('6'), lit('w'), lit('7'), lit('x'), lit('8'), lit('y'), lit('9')
+delta_final_df = opening_balance_df.select(
+    concat(col("BRANCH_CODE"), col("CURRENCY"), col("CGL")).alias("GLCC"),
+    col("BALANCE").cast(DecimalType(25, 4)).alias("CLOSING_BALANCE"),
+    col("BALANCE_DATE")
 )
 
-df_with_signed_amount = df_clean.withColumns({
-    "last_digit": digit_map.getItem(col("sign_char")),
-    "sign": when(col("sign_char").isin(['p','q','r','s','t','u','v','w','x','y']), -1).otherwise(1)
-})
 
-df_with_signed_amount = df_with_signed_amount.withColumn(
-    "Amount_decimal_str",
-    concat(col("Amount_base"), col("last_digit"))
+delta_final_df.write.format("delta").mode("overwrite") \
+    .option("replaceWhere", f"BALANCE_DATE = '{etl_plus_1_str}'") \
+    .save(GL_DATALAKE_PATH)
+
+logger.info("=== Delta write completed ===")
+log_etl(spark, process_run_id, "writing_opening_balance_delta", 2, "Delta write successful")
+
+
+# ==========================================================
+# STEP 5: Writing to Oracle
+# ==========================================================
+logger.info("=== Writing opening balance to oracle balance table ===")
+log_etl(spark, process_run_id, "writing_opening_balance_oracle", 1, "Writing to Oracle")
+
+write_oracle(
+    opening_balance_df.select(
+        col("CGL"),
+        col("CURRENCY"),
+        col("BRANCH_CODE"),
+        col("BALANCE_DATE"),
+        col("BALANCE").cast(DecimalType(25, 4)),
+        col("INR_BALANCE").cast(DecimalType(25, 4))
+    ),
+    BALANCE
 )
 
-df_final = df_with_signed_amount.withColumns({
-    "Amount_final": (col("Amount_decimal_str").cast(DecimalType(25,4)) / 1000) * col("sign")
-})
-
-df_with_signed_amount = df_final.withColumns({
-    "Amountpve": when(df_final["Amount_final"] > 0, df_final["Amount_final"]).otherwise(0),
-    "Amountnve": when(df_final["Amount_final"] < 0, df_final["Amount_final"]).otherwise(0)
-})
-
-df_agg = df_with_signed_amount.groupBy("Id").agg(
-    F.sum(F.col("Amountpve")).alias("DEBIT_AMOUNT"),
-    F.sum(F.col("Amountnve")).alias("CREDIT_AMOUNT"),
-    F.count(F.col("Id")).alias("TRANSACTION_COUNT")
+if is_year_end:
+    write_oracle(
+    opening_balance_df.select(
+        col("CGL"),
+        col("CURRENCY"),
+        col("BRANCH_CODE"),
+        col("BALANCE_DATE"),
+        col("BALANCE").cast(DecimalType(25, 4)),
+        col("INR_BALANCE").cast(DecimalType(25, 4))
+    ),
+    "GL_BALANCE_YEAR_END"
 )
+logger.info("=== Oracle write completed ===")
+log_etl(spark, process_run_id, "writing_opening_balance_oracle", 2, "Oracle write successful")
 
-df_mapped = df_agg.withColumns({ 
-    "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()),
-    "JOURNAL_ID": lit(None).cast(StringType()),
-    "BRANCH_CODE": substring(col("Id"), 1, 5),
-    "CURRENCY": substring(col("Id"), 6, 3),
-    "CGL": substring(col("Id"), 9, 10),
-    "NARRATION": lit("CBS consolidated txns").cast(StringType()),
-    "SOURCE_FLAG": lit("C").cast(StringType())
-})
 
-df_final_schema = df_mapped.select(
-    "BATCH_ID",
-    "JOURNAL_ID",
-    "BRANCH_CODE",
-    "CURRENCY",
-    "CGL",
-    "NARRATION",
-    "DEBIT_AMOUNT",
-    "CREDIT_AMOUNT",
-    "TRANSACTION_COUNT",
-    "SOURCE_FLAG"
-)
+# ==========================================================
+# STEP 6: Updating FINCORE_DATE_DEV 
+# ==========================================================
+try:
+    logger.info(f"=== Updating FINCORE_DATE_DEV to {etl_plus_1_str} ===")
+    log_etl(spark, process_run_id, "fincore_date_update", 1, "Updating user's date")
 
-df_final_schema.cache()
+    oracle_props = get_oracle_properties()
+    url = oracle_props['url']
+    user = oracle_props['user']
+    pwd = oracle_props['password']
+
+    conn = spark._jvm.java.sql.DriverManager.getConnection(url, user, pwd)
+    conn.setAutoCommit(False)
+
+    stmt = conn.createStatement()
+
+    update_sql = f"""
+        UPDATE FINCORE_DATE
+        SET USERS_DATE = TO_DATE('{etl_plus_1_str}', 'YYYY-MM-DD'),
+            LAST_UPDATED_DATE = SYSTIMESTAMP
+        WHERE ROWNUM = 1
+    """
+
+    stmt.executeUpdate(update_sql)
+    conn.commit()
+
+    stmt.close()
+    conn.close()
+
+    logger.info("=== FINCORE_DATE updated successfully ===")
+    log_etl(spark, process_run_id, "fincore_date_update", 2, "User's date advanced")
+
+except Exception as e:
+    logger.error(f"Failed to update FINCORE_DATE: {e}")
+    log_etl(spark, process_run_id, "job_failed", 3, f"Fatal Error: {str(e)[:200]}")
+    spark.stop()
+    sys.exit(1)
+    raise e
+
+logger.info("=== GLIF DATA TRANSFER COMPLETED SUCCESSFULLY ===")
+log_etl(spark, process_run_id, "gl_data_transfer_started", 2, "JOB COMPLETED")
+spark.stop()
+sys.exit(0)
