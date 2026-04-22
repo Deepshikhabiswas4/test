@@ -1,37 +1,121 @@
-controller file
-package com.tcs.fincore.AsciiGenerationService.Controller;
+DTO files
+ file job dto
+package com.tcs.fincore.AsciiGenerationService.DTO;
 
-import com.tcs.fincore.AsciiGenerationService.DTO.ReportRequest;
-import com.tcs.fincore.AsciiGenerationService.Service.AsciiGenerationService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
 
-@RestController
-@RequestMapping("/api/ascii")
-public class AsciiController {
+import org.apache.hadoop.fs.Path;
 
-    @Autowired
-    private AsciiGenerationService service;
+public class FileJob {
+    private Long configId;
+    private Path filePath;
+    private String batchId; // <--- This was missing
+    private String date;
 
-    @PostMapping("/generate")
-    public ResponseEntity<String> generate(@RequestBody ReportRequest request) {
-        try {
-            if (request.getId() == null) {
-                return ResponseEntity.badRequest().body("Error: 'Id' is missing");
-            }
-
-             if (request.getReportDate() == null) {
-                return ResponseEntity.badRequest().body("Error: 'Date' is missing");
-            }
-
-            String status = service.initiateBatch(request.getId(),request.getReportDate());
-
-            return ResponseEntity.accepted().body("Success: " + status);
-
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body("Error: " + e.getMessage());
-        }
+    // The constructor must accept 3 arguments now
+    public FileJob(Long configId, Path filePath, String batchId, String date) {
+        this.configId = configId;
+        this.filePath = filePath;
+        this.batchId = batchId;
+        this.date=date;
     }
+
+    public Long getConfigId() { return configId; }
+    public Path getFilePath() { return filePath; }
+    public String getBatchId() { return batchId; } // <--- This getter was missing
+    public String getDate(){ return date; }
 }
 
+reportgendto
+package com.tcs.fincore.AsciiGenerationService.DTO;
+
+
+import java.time.LocalDate;
+
+import com.fasterxml.jackson.annotation.JsonFormat;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import lombok.Data;
+
+@Data
+public class ReportGenerationDTO {
+
+    @NotNull(message = "Process Run Id Cannot be null")
+    private Long processRunId;
+
+    @NotNull(message = "Run Id Cannot be null")
+    private Integer runId;
+
+    @NotNull(message = "Stage Id Cannot be null")
+    @NotBlank(message = "Stage Id Cannot be Blank")
+    private String stageId;
+
+    @NotNull(message = "Report Type Cannot be null")
+    @NotBlank(message = "Report Type Cannot be blank")
+    private String reportType;
+
+    // @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "dd-MM-yyyy")
+    // private LocalDate date;
+
+    // private String branch; 
+
+    // private String cgl;
+
+    private Long id;
+    private String reportDate;
+
+}
+
+reportgenresponse dto
+package com.tcs.fincore.AsciiGenerationService.DTO;
+
+
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.tcs.fincore.AsciiGenerationService.util.FormatStatus;
+import com.tcs.fincore.AsciiGenerationService.util.ReportFormat;
+import lombok.Data;
+
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Map;
+
+@Data
+public class ReportGenerationResponseDTO {
+
+    private Long processRunId;
+
+    private String stageId;
+
+    // private String reportName;
+
+    
+
+    // @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "dd-MM-yyyy")
+    // private LocalDate date;
+
+    // private List<String> extensions;
+
+    private Integer runId;
+
+    // private String status;
+
+    // private String remark;
+
+    private Long id;
+    private String reportDate;
+
+    Map<ReportFormat, FormatStatus> formatResults;
+    Map<ReportFormat, String> formatErrors;
+
+}
+
+reportrequest dto
+package com.tcs.fincore.AsciiGenerationService.DTO;
+
+import lombok.Data;
+
+@Data
+public class ReportRequest {
+    private Long id;
+    private String reportDate; // The user sends this in JSON
+}
