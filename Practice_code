@@ -1,63 +1,148 @@
-Model file
+kafka files
+ producer file
 
-package com.tcs.fincore.AsciiGenerationService.Model;
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
-import lombok.Data;
+package com.tcs.fincore.AsciiGenerationService.kafka;
 
-@Entity
-@Table(name = "ASCII_CONFIG")
-@Data
-public class AsciiConfig {
+import com.tcs.fincore.AsciiGenerationService.DTO.ReportGenerationResponseDTO;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Service;
 
-    @Id
-    @Column(name = "ID")
-    private Long id;
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ReportKafkaProducer {
 
-    @Column(name = "REPORT_ID")
-    private String reportId;
+    private final KafkaTemplate<String, ReportGenerationResponseDTO> kafkaTemplate;
 
-    @Column(name = "FILE_TYPE")
-    private String fileType;
+    private static final String RESPONSE_TOPIC = "ASCII-report-generation-response";
 
-    @Column(name = "INPUT_FILE_NAME")
-    private String inputFileName;
+    public void sendResponse(ReportGenerationResponseDTO response) {
+         log.info("ASCII Report Generation Response Sent :{} ",response);
 
-    @Column(name = "OUTPUT_FIRST_LINE")
-    private String outputFirstLine;
+        kafkaTemplate.send(RESPONSE_TOPIC, response);
+    }
+}
 
-    @Column(name = "OUTPUT_END_LINE")
-    private String outputEndLine;
+consumer file
+package com.tcs.fincore.AsciiGenerationService.kafka;
 
-    @Column(name = "INPUT_HEAD_COL")
-    private Integer inputHeadCol;
+import com.tcs.fincore.AsciiGenerationService.DTO.ReportGenerationDTO;
+import com.tcs.fincore.AsciiGenerationService.DTO.ReportGenerationResponseDTO;
+import com.tcs.fincore.AsciiGenerationService.Service.KafkaService;
+import com.tcs.fincore.AsciiGenerationService.util.Constants;
 
-    @Column(name = "INPUT_HEAD_REGEX")
-    private String inputHeadRegex;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
-    @Column(name = "OUTPUT_HEAD_COL_PAD")
-    private String outputHeadColPad;
+import java.time.LocalDateTime;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-    @Column(name = "AMOUNT_COL_SEQ")
-    private String amountColSeq;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validator;
 
-    @Column(name = "OUTPUT_AMT_COL_LOGIC")
-    private String outputAmtColLogic;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.messaging.handler.annotation.Payload;
+import org.springframework.stereotype.Service;
+import org.springframework.validation.annotation.Validated;
 
-    @Column(name = "OUTPUT_AMT_DECIMAL")
-    private String outputAmtDecimal;
+// @Slf4j
+// @Service
+// @RequiredArgsConstructor
+// @Validated
+// public class ReportKafkaConsumer {
 
-    @Column(name = "OUTPUT_AMT_COL_PAD")
-    private String outputAmtColPad;
+//     private final KafkaService kafkaService;
+//     private final ReportKafkaProducer producer;
 
-    @Column(name = "OUTPUT_AMT_SIGN")
-    private String outputAmtSign;
+//     @KafkaListener(topics = "report-generation-request", groupId = "Airflow_ETL", properties = {
+//             "spring.json.value.default.type=com.fincore.ReportService.dto.ReportGenerationDTO" })
+//     public void consume(@Valid ReportGenerationDTO request) {
 
-    @Column(name = "OUTPUT_PER_LINE_HEAD")
-    private Integer outputPerLineHead;
+//         try {
+//             log.info("Report Generation Request Recieved:{} ", request);
+//             kafkaService.processReport(request);
 
-    @Column(name = "OUTPUT_INCLUDE_CONDITION")
-    private String outputIncludeCondition;
+//         }
+//         catch (CallNotPermittedException e) {
+//             log.error("Circuit Breaker is OPEN. Skipping/Retrying later for RunId: {}", request.getRunId());
+
+//         }
+
+//         catch (ConstraintViolationException e) {
+//             log.info("Constraint Violation {}",e.getMessage());
+//             ReportGenerationResponseDTO response = new ReportGenerationResponseDTO();
+//             response.setRunId(request.getRunId());
+//             response.setProcessRunId(request.getProcessRunId());
+//             response.setStageId(request.getStageId());
+//             response.setStatus(Constants.FAILED);
+//             response.setRemark("Validation Failed " + e.getMessage());
+//             producer.sendResponse(response);
+//         }
+
+//     }
+// }
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class ReportKafkaConsumer {
+
+    private final KafkaService kafkaService;
+    private final ReportKafkaProducer producer;
+    private final Validator validator;
+
+    @KafkaListener(topics = "ascii-report-generation-request", groupId = "Airflow_ETL", properties = {
+            "spring.json.value.default.type=com.fincore.AsciiGenerationService.DTO.ReportGenerationDTO"
+            
+    })
+    public void consume(ReportGenerationDTO request) {
+
+        log.info("Received ASCII Report Generation Request: {}", request);
+
+        ReportGenerationResponseDTO response = new ReportGenerationResponseDTO();
+
+        try {
+
+            Set<ConstraintViolation<ReportGenerationDTO>> violations = validator.validate(request);
+
+            if (!violations.isEmpty()) {
+
+                String errorMessage = violations.stream()
+                        .map(ConstraintViolation::getMessage)
+                        .collect(Collectors.joining(", "));
+
+                log.error("Validation Failed: {}", errorMessage);
+
+                response.setRunId(request.getRunId());
+                response.setProcessRunId(request.getProcessRunId());
+                response.setStageId(request.getStageId());
+                // response.setStatus(Constants.FAILED);
+                // response.setRemark("Validation Failed: " + errorMessage);
+                // response.setTimestamp(LocalDateTime.now());
+
+                producer.sendResponse(response);
+                return;
+            }
+
+            kafkaService.processReport(request);
+
+        } catch (RuntimeException e) {
+
+            log.error("Processing Failed for RunId {}: {}", request.getRunId(), e.getMessage(), e);
+
+            response.setRunId(request.getRunId());
+            response.setProcessRunId(request.getProcessRunId());
+            response.setStageId(request.getStageId());
+            // response.setStatus(Constants.FAILED);
+            // response.setRemark("Processing Failed: " + e.getMessage());
+            // response.setTimestamp(LocalDateTime.now());
+
+            producer.sendResponse(response);
+        }
+    }
 }
