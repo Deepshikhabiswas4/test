@@ -1,71 +1,46 @@
-jobqueuemanager service file
+kafka service
 
 package com.tcs.fincore.AsciiGenerationService.Service;
 
-
 import com.tcs.fincore.AsciiGenerationService.DTO.FileJob;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy; // <--- IMPORT THIS
+
+import com.tcs.fincore.AsciiGenerationService.DTO.ReportGenerationDTO;
+import com.tcs.fincore.AsciiGenerationService.DTO.ReportGenerationResponseDTO;
+import com.tcs.fincore.AsciiGenerationService.kafka.ReportKafkaProducer;
+import com.tcs.fincore.AsciiGenerationService.util.Constants;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.io.IOException;
 
 @Service
-@Slf4j
-public class JobQueueManager {
+@RequiredArgsConstructor
+public class KafkaService {
 
     private final AsciiGenerationService asciiService;
+    private final ReportKafkaProducer producer;
 
-    // Use Constructor Injection with @Lazy to break the cycle
-    @Autowired
-    public JobQueueManager(@Lazy AsciiGenerationService asciiService) {
-        this.asciiService = asciiService;
-    }
+    public void processReport(ReportGenerationDTO request) {
 
-    // The Queue: Holds 'FileJob' (Config ID + Specific File Path)
-    private final BlockingQueue<FileJob> jobQueue = new LinkedBlockingQueue<>();
+        ReportGenerationResponseDTO response;
 
-    // 10 Threads processing files in parallel
-    private final ExecutorService executorService = Executors.newFixedThreadPool(10);
+        try {
+            response = asciiService.initiateBatch(request);
 
-    private volatile boolean running = true;
+            // if (response.getStatus() == null) {
+            //     response.setStatus(Constants.FAILED);
+            //     response.setRemark("Internal failure.");
+            // }
 
-    @PostConstruct
-    public void startWorkers() {
-        Thread dispatcher = new Thread(() -> {
-            while (running) {
-                try {
-                    FileJob job = jobQueue.take();
-                    executorService.submit(() -> asciiService.processSingleFile(job));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        });
-        dispatcher.setName("Job-Dispatcher");
-        dispatcher.start();
-        log.info("Batch Processor Started. Waiting for jobs...");
-    }
+        } catch ( IOException e ) {
 
-    public void submitFileJob(FileJob job) {
-        jobQueue.offer(job);
-    }
+            response = new ReportGenerationResponseDTO();
+            response.setRunId(request.getRunId());
+            response.setReportName(request.getReportType());
+            // response.setStatus(Constants.FAILED);
+            // response.setRemark("Exception: " + e.getMessage());
+        }
 
-    public int getQueueSize() {
-        return jobQueue.size();
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        running = false;
-        executorService.shutdown();
+        producer.sendResponse(response);
     }
 }
-
