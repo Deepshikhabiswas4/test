@@ -1,84 +1,158 @@
-from pyspark.sql import SparkSession, functions as F, types as T
-from pyspark.sql.functions import col, lit, current_timestamp, coalesce, when, substring, expr,concat, to_date,count ,to_json ,struct
-from pyspark.sql.functions import collect_list, struct, to_json, sum , broadcast
+from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.functions import col, lit, current_timestamp, coalesce, when
 import traceback
 import sys
-from datetime import date,timedelta
-from pyspark.sql.functions import desc
+from datetime import timedelta
+
 # =========== Common Methods =============================
-import common.constants  as constants
-from common.properties import get_oracle_properties,get_jdbc_url
+import common.constants as constants
+from common.properties import get_oracle_properties, get_jdbc_url
 from common.dateUtil import get_etl_date
 from common.processRun import get_process_run_id
 from common.log_etl_modified import log_etl
 from common.read_write_oracle import read_oracle
 from common.fileUtil import tables_to_read
 
-INSERT=0
-UPDATE=1
 
 def main(args):
-    
     try:
-        
-         spark = (SparkSession.builder.appName("cNTR_SUMMARY_COUNT_SCRIPT").getOrCreate())        
-        
-         oracle_properties=get_oracle_properties()
+        spark = SparkSession.builder.appName("GL_BAL_DIFF_SCRIPT").getOrCreate()
 
-         oracle_tables = tables_to_read("glif")
-         TRANSACTIONS = oracle_tables["TRANSACTIONS"]
-         BALANCE = oracle_tables["BALANCE"]
+        oracle_properties = get_oracle_properties()
+        jdbc_url = get_jdbc_url()
 
-         today = get_etl_date(spark)
-         run_date= today.strftime("%d-%m-%Y")
-         PROCESS_ID= getattr(constants,"DIFFERENCE_PIPELINE_ID",3)
-         process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,run_date)
-         print(f"Process RunId: {process_run_id}")         
-        
-         print(today)
-         print(run_date)
-         log_etl(spark,process_run_id,"cntr_summary_started",1,"generating cntr_summary.")
-         
-         query = f"""(select cgl, currency,count(1) as count
-                        from {BALANCE} 
-                        WHERE cgl IN ('1260505001', '1260505003', '1111111111') and 
-                        BALANCE_DATE= TO_DATE('{run_date}', 'DD-MM-YYYY') and BALANCE <> 0  
-                        group by  cgl, currency) t"""
+        oracle_tables = tables_to_read("glif")
+        BALANCE = oracle_tables["BALANCE"]
 
-         jdbc_url = get_jdbc_url()
-         oracle_properties = get_oracle_properties()
-        #  result_df = spark.read.jdbc(url=jdbc_url, table=query, properties=oracle_properties)
-         result_df = read_oracle(spark,query)
-         summary_df = result_df.select(collect_list(
-                                           struct("cgl", "currency", "count")
-                                       ).alias("summary"))
-         
-         final_df = summary_df.select(lit("CNTR Summary").alias("Summary Name"),
-                                       lit(run_date).alias("date"),
-                                       "summary")
-         
-         final_json = final_df.selectExpr("to_json(struct(*)) AS value").first()["value"]
+        today = get_etl_date(spark)
+        run_date = today.strftime("%d-%m-%Y")
+        yesterday = (today - timedelta(days=1)).strftime("%d-%m-%Y")
 
-         log_etl(spark,process_run_id,"cntr_summary_calculated",2,"cntr Summary Succesfully Calculated",0,final_json)
-         log_etl(spark,process_run_id,"cntr_summary_started",2,"cntr_summary generation completed.")
-         print(final_json)
-         spark.stop()
-         sys.exit(0)
+        PROCESS_ID = getattr(constants, "DIFFERENCE_PIPELINE_ID", 3)
+        process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(
+            spark, PROCESS_ID, run_date
+        )
 
-         
-        
+        print(f"Process RunId: {process_run_id}")
+
+        log_etl(spark, process_run_id, "gl_bal_diff_started", 1, "GL balance diff started")
+
+        # ==========================================================
+        # STEP 1: Read TODAY balances
+        # ==========================================================
+        today_df = read_oracle(
+            spark,
+            f"""
+            (SELECT cgl, branch, currency, balance as t_bal
+             FROM {BALANCE}
+             WHERE balance_date = TO_DATE('{run_date}', 'DD-MM-YYYY')) t
+            """
+        )
+
+        # ==========================================================
+        # STEP 2: Read YESTERDAY balances
+        # ==========================================================
+        yest_df = read_oracle(
+            spark,
+            f"""
+            (SELECT cgl, branch, currency, balance as y_bal
+             FROM {BALANCE}
+             WHERE balance_date = TO_DATE('{yesterday}', 'DD-MM-YYYY')) t
+            """
+        )
+
+        # ==========================================================
+        # STEP 3: FULL OUTER JOIN
+        # ==========================================================
+        joined_df = today_df.alias("t").join(
+            yest_df.alias("y"),
+            on=["cgl", "branch", "currency"],
+            how="full_outer"
+        )
+
+        # ==========================================================
+        # STEP 4: APPLY CONDITIONS (FROM YOUR IMAGE)
+        # ==========================================================
+        result_df = joined_df.withColumn(
+            "type",
+            when(
+                (coalesce(col("y_bal"), lit(0)) == 0) &
+                (coalesce(col("t_bal"), lit(0)) > 0),
+                lit("NEW")
+            ).when(
+                (coalesce(col("y_bal"), lit(0)) != 0) &
+                (coalesce(col("t_bal"), lit(0)) != 0) &
+                (col("y_bal") != col("t_bal")),
+                lit("DIFF")
+            ).when(
+                (coalesce(col("y_bal"), lit(0)) != 0) &
+                (coalesce(col("t_bal"), lit(0)) == 0),
+                lit("CLOSED")
+            ).otherwise(lit("IGNORE"))
+        )
+
+        # ==========================================================
+        # STEP 5: DIFFERENCE AMOUNT
+        # ==========================================================
+        result_df = result_df.withColumn(
+            "diff_amount",
+            coalesce(col("t_bal"), lit(0)) - coalesce(col("y_bal"), lit(0))
+        )
+
+        # ==========================================================
+        # STEP 6: FILTER ONLY REQUIRED TYPES
+        # ==========================================================
+        final_df = result_df.filter(col("type") != "IGNORE")
+
+        # ==========================================================
+        # STEP 7: FINAL STRUCTURE
+        # ==========================================================
+        final_df = final_df.select(
+            "cgl",
+            "branch",
+            "currency",
+            col("y_bal"),
+            col("t_bal"),
+            "diff_amount",
+            "type",
+            lit(run_date).alias("run_date"),
+            current_timestamp().alias("created_ts")
+        )
+
+        # ==========================================================
+        # STEP 8: WRITE TO ORACLE TABLE
+        # ==========================================================
+        final_df.write.jdbc(
+            url=jdbc_url,
+            table="GL_BAL_DIFF",
+            mode="append",
+            properties=oracle_properties
+        )
+
+        log_etl(
+            spark,
+            process_run_id,
+            "gl_bal_diff_completed",
+            2,
+            "GL balance diff successfully completed"
+        )
+
+        spark.stop()
+        sys.exit(0)
+
     except Exception as e:
-        print("ERROR during reconciliation:")
-        log_etl(spark,process_run_id,"cntr_summary_calculated",3,"Error while calculating cntr_Summary.")
-        log_etl(spark,process_run_id,"cntr_summary_started",3,"Error while generating cntr_summary.")
+        print("ERROR during GL BAL DIFF:")
         traceback.print_exc()
+
+        log_etl(spark, process_run_id, "gl_bal_diff_failed", 3, "Error in GL balance diff")
+
         try:
             spark.stop()
         except:
             pass
-        sys.exit(1)
-        
 
-if __name__=="__main__":
+        sys.exit(1)
+
+
+if __name__ == "__main__":
     main(sys.argv)
-i have to calculate the difference between the balances from gl balance table for a particular glcc(branch code, currency, cgl combined) and write it into oracle table called GL_BAL_DIFF, 
