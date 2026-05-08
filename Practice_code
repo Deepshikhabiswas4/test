@@ -3,7 +3,8 @@ from pyspark.sql.functions import (
     col,
     lit,
     coalesce,
-    when
+    when,
+    round
 )
 
 import traceback
@@ -14,12 +15,16 @@ from datetime import timedelta
 # common imports
 # ======================================================
 import common.constants as constants
+
 from common.properties import (
     get_oracle_properties,
     get_jdbc_url
 )
+
 from common.processRun import get_process_run_id
+
 from common.log_etl_modified import log_etl
+
 from common.read_write_oracle import read_oracle
 
 
@@ -182,7 +187,9 @@ def process_date(
                 coalesce(col("T_BAL"), lit(0)) != 0
             ) &
             (
-                col("Y_BAL") != col("T_BAL")
+                round(col("Y_BAL"), 2)
+                !=
+                round(col("T_BAL"), 2)
             ),
 
             lit("DIFFERENCE")
@@ -213,7 +220,9 @@ def process_date(
                 coalesce(col("T_BAL"), lit(0)) != 0
             ) &
             (
-                col("Y_BAL") == col("T_BAL")
+                round(col("Y_BAL"), 2)
+                ==
+                round(col("T_BAL"), 2)
             ),
 
             lit("ZERO_DIFFERENCE")
@@ -262,8 +271,7 @@ def process_date(
         )
 
         # ==================================================
-        # carry same original error date
-        # ==================================================
+        # DIFFER=
         .when(
             col("TYPE").isin(
                 "DIFFERENCE",
@@ -331,6 +339,36 @@ def process_date(
     final_df.show(200, False)
 
     # ======================================================
+    # DELETE OLD RECORDS FOR SAME DATE
+    # ======================================================
+    print(f"Deleting old data for {run_date}")
+
+    conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
+        jdbc_url,
+        oracle_properties["user"],
+        oracle_properties["password"]
+    )
+
+    stmt = conn.createStatement()
+
+    stmt.execute(
+        f"""
+        DELETE FROM GL_BALANCE_DIFFERENCE
+        WHERE BALANCE_DATE = TO_DATE(
+            '{run_date}',
+            'DD-MM-YYYY'
+        )
+        """
+    )
+
+    conn.commit()
+
+    stmt.close()
+    conn.close()
+
+    print(f"Old records deleted for {run_date}")
+
+    # ======================================================
     # write to oracle
     # ======================================================
     final_df.write.jdbc(
@@ -360,49 +398,25 @@ def main(args):
         ).getOrCreate()
 
         oracle_properties = get_oracle_properties()
+
         jdbc_url = get_jdbc_url()
 
         # ======================================================
-        # get max processed date
+        # ALWAYS START FROM MIN DATE
         # ======================================================
-        max_date_df = read_oracle(
+        min_date_df = read_oracle(
             spark,
             """
             (
                 SELECT
-                    MAX(BALANCE_DATE) AS MAX_DATE
-                FROM GL_BALANCE_DIFFERENCE
-            ) X
+                    MIN(BALANCE_DATE) AS MIN_DATE
+                FROM GL_BALANCE
+                WHERE CGL IN ('1111111111')
+            ) M
             """
         )
 
-        max_date = max_date_df.collect()[0]["MAX_DATE"]
-
-        # ======================================================
-        # if table empty
-        # ======================================================
-        if max_date is None:
-
-            min_date_df = read_oracle(
-                spark,
-                """
-                (
-                    SELECT
-                        MIN(BALANCE_DATE) AS MIN_DATE
-                    FROM GL_BALANCE
-                    WHERE CGL IN ('1111111111')
-                ) M
-                """
-            )
-
-            start_date = min_date_df.collect()[0]["MIN_DATE"]
-
-        else:
-
-            # ==================================================
-            # continue from next date
-            # ==================================================
-            start_date = max_date + timedelta(days=1)
+        start_date = min_date_df.collect()[0]["MIN_DATE"]
 
         # ======================================================
         # latest available GL_BALANCE date
@@ -422,6 +436,7 @@ def main(args):
         end_date = latest_balance_df.collect()[0]["MAX_BAL_DATE"]
 
         print(f"START DATE : {start_date}")
+
         print(f"END DATE   : {end_date}")
 
         # ======================================================
