@@ -18,13 +18,14 @@ from common.properties import (
     get_oracle_properties,
     get_jdbc_url
 )
-from common.dateUtil import get_etl_date
 from common.processRun import get_process_run_id
 from common.log_etl_modified import log_etl
 from common.read_write_oracle import read_oracle
-from common.fileUtil import tables_to_read
 
 
+# ======================================================
+# process one date
+# ======================================================
 def process_date(
     spark,
     process_run_id,
@@ -33,19 +34,16 @@ def process_date(
     jdbc_url
 ):
 
-    # ======================================================
-    # dates
-    # ======================================================
     run_date = current_date.strftime("%d-%m-%Y")
 
     yesterday = (
         current_date - timedelta(days=1)
     ).strftime("%d-%m-%Y")
 
-    print("===========================================")
+    print("=================================================")
     print(f"PROCESSING DATE : {run_date}")
-    print(f"YESTERDAY DATE : {yesterday}")
-    print("===========================================")
+    print(f"YESTERDAY DATE  : {yesterday}")
+    print("=================================================")
 
     # ======================================================
     # today data
@@ -100,7 +98,7 @@ def process_date(
     yest_df.show(100, False)
 
     # ======================================================
-    # existing latest FIRST_ERROR_DATE
+    # previous FIRST_ERROR_DATE
     # ======================================================
     existing_df = read_oracle(
         spark,
@@ -137,7 +135,7 @@ def process_date(
     existing_df.show(100, False)
 
     # ======================================================
-    # join today and yesterday
+    # full outer join
     # ======================================================
     joined_df = today_df.alias("t").join(
         yest_df.alias("y"),
@@ -156,11 +154,12 @@ def process_date(
     # TYPE logic
     # ======================================================
     result_df = joined_df.withColumn(
+
         "TYPE",
 
-        # ==========================================
+        # ==================================================
         # NEW_ENTRY
-        # ==========================================
+        # ==================================================
         when(
             (
                 coalesce(col("Y_BAL"), lit(0)) == 0
@@ -172,9 +171,9 @@ def process_date(
             lit("NEW_ENTRY")
         )
 
-        # ==========================================
+        # ==================================================
         # DIFFERENCE
-        # ==========================================
+        # ==================================================
         .when(
             (
                 coalesce(col("Y_BAL"), lit(0)) != 0
@@ -189,9 +188,9 @@ def process_date(
             lit("DIFFERENCE")
         )
 
-        # ==========================================
+        # ==================================================
         # CLOSED
-        # ==========================================
+        # ==================================================
         .when(
             (
                 coalesce(col("Y_BAL"), lit(0)) != 0
@@ -203,9 +202,9 @@ def process_date(
             lit("CLOSED")
         )
 
-        # ==========================================
+        # ==================================================
         # ZERO_DIFFERENCE
-        # ==========================================
+        # ==================================================
         .when(
             (
                 coalesce(col("Y_BAL"), lit(0)) != 0
@@ -220,10 +219,9 @@ def process_date(
             lit("ZERO_DIFFERENCE")
         )
 
-        # ==========================================
+        # ==================================================
         # IGNORE
-        # both zero
-        # ==========================================
+        # ==================================================
         .otherwise(
             lit("IGNORE")
         )
@@ -252,17 +250,27 @@ def process_date(
     # FIRST_ERROR_DATE logic
     # ======================================================
     result_df = result_df.withColumn(
+
         "FINAL_FIRST_ERROR_DATE",
 
+        # ==================================================
+        # NEW_ENTRY
+        # ==================================================
         when(
             col("TYPE") == "NEW_ENTRY",
             lit(current_date)
-        ).when(
+        )
+
+        # ==================================================
+        # carry same original error date
+        # ==================================================
+        .when(
             col("TYPE").isin(
                 "DIFFERENCE",
                 "ZERO_DIFFERENCE",
                 "CLOSED"
             ),
+
             coalesce(
                 col("FIRST_ERROR_DATE"),
                 lit(current_date)
@@ -294,12 +302,18 @@ def process_date(
         col("CURRENCY"),
         col("CGL"),
 
+        # ==============================================
+        # balance difference
+        # ==============================================
         (
             coalesce(col("Y_BAL"), lit(0))
             -
             coalesce(col("T_BAL"), lit(0))
         ).alias("BALANCE"),
 
+        # ==============================================
+        # INR balance difference
+        # ==============================================
         (
             coalesce(col("Y_INR_BAL"), lit(0))
             -
@@ -329,6 +343,9 @@ def process_date(
     print(f"SUCCESSFULLY COMPLETED FOR DATE : {run_date}")
 
 
+# ======================================================
+# main
+# ======================================================
 def main(args):
 
     spark = None
@@ -346,16 +363,70 @@ def main(args):
         jdbc_url = get_jdbc_url()
 
         # ======================================================
-        # start date
+        # get max processed date
         # ======================================================
-        start_date = get_etl_date(spark)
+        max_date_df = read_oracle(
+            spark,
+            """
+            (
+                SELECT
+                    MAX(BALANCE_DATE) AS MAX_DATE
+                FROM GL_BALANCE_DIFFERENCE
+            ) X
+            """
+        )
+
+        max_date = max_date_df.collect()[0]["MAX_DATE"]
 
         # ======================================================
-        # end date
-        # current system date
+        # if table empty
         # ======================================================
-        end_date = get_etl_date(spark)
+        if max_date is None:
 
+            min_date_df = read_oracle(
+                spark,
+                """
+                (
+                    SELECT
+                        MIN(BALANCE_DATE) AS MIN_DATE
+                    FROM GL_BALANCE
+                    WHERE CGL IN ('1111111111')
+                ) M
+                """
+            )
+
+            start_date = min_date_df.collect()[0]["MIN_DATE"]
+
+        else:
+
+            # ==================================================
+            # continue from next date
+            # ==================================================
+            start_date = max_date + timedelta(days=1)
+
+        # ======================================================
+        # latest available GL_BALANCE date
+        # ======================================================
+        latest_balance_df = read_oracle(
+            spark,
+            """
+            (
+                SELECT
+                    MAX(BALANCE_DATE) AS MAX_BAL_DATE
+                FROM GL_BALANCE
+                WHERE CGL IN ('1111111111')
+            ) L
+            """
+        )
+
+        end_date = latest_balance_df.collect()[0]["MAX_BAL_DATE"]
+
+        print(f"START DATE : {start_date}")
+        print(f"END DATE   : {end_date}")
+
+        # ======================================================
+        # process id
+        # ======================================================
         PROCESS_ID = getattr(
             constants,
             "DIFFERENCE_PIPELINE_ID",
@@ -372,10 +443,10 @@ def main(args):
             )
         )
 
-        print(f"Process RunId: {process_run_id}")
+        print(f"Process RunId : {process_run_id}")
 
         # ======================================================
-        # log start
+        # ETL START LOG
         # ======================================================
         log_etl(
             spark,
@@ -386,7 +457,7 @@ def main(args):
         )
 
         # ======================================================
-        # LOOP THROUGH DATES
+        # loop through all dates
         # ======================================================
         current_date = start_date
 
@@ -400,10 +471,12 @@ def main(args):
                 jdbc_url
             )
 
-            current_date = current_date + timedelta(days=1)
+            current_date = (
+                current_date + timedelta(days=1)
+            )
 
         # ======================================================
-        # log success
+        # ETL SUCCESS LOG
         # ======================================================
         log_etl(
             spark,
@@ -422,6 +495,7 @@ def main(args):
         traceback.print_exc()
 
         try:
+
             log_etl(
                 spark,
                 process_run_id,
@@ -429,6 +503,7 @@ def main(args):
                 3,
                 "Error in GL balance difference"
             )
+
         except:
             pass
 
@@ -440,5 +515,9 @@ def main(args):
         sys.exit(1)
 
 
+# ======================================================
+# driver
+# ======================================================
 if __name__ == "__main__":
+
     main(sys.argv)
