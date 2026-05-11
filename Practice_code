@@ -73,6 +73,15 @@ def process_date(
         """
     )
 
+    # ======================================================
+    # remove duplicates
+    # ======================================================
+    today_df = today_df.dropDuplicates([
+        "BRANCH_CODE",
+        "CURRENCY",
+        "CGL"
+    ])
+
     print("=========== TODAY DF ===========")
     today_df.show(100, False)
 
@@ -98,6 +107,15 @@ def process_date(
         ) Y
         """
     )
+
+    # ======================================================
+    # remove duplicates
+    # ======================================================
+    yest_df = yest_df.dropDuplicates([
+        "BRANCH_CODE",
+        "CURRENCY",
+        "CGL"
+    ])
 
     print("=========== YESTERDAY DF ===========")
     yest_df.show(100, False)
@@ -262,16 +280,11 @@ def process_date(
 
         "FINAL_FIRST_ERROR_DATE",
 
-        # ==================================================
-        # NEW_ENTRY
-        # ==================================================
         when(
             col("TYPE") == "NEW_ENTRY",
             lit(current_date)
         )
 
-        # ==================================================
-        # DIFFER=
         .when(
             col("TYPE").isin(
                 "DIFFERENCE",
@@ -283,6 +296,10 @@ def process_date(
                 col("FIRST_ERROR_DATE"),
                 lit(current_date)
             )
+        )
+
+        .otherwise(
+            lit(current_date)
         )
     )
 
@@ -307,7 +324,9 @@ def process_date(
         lit(current_date).alias("BALANCE_DATE"),
 
         col("BRANCH_CODE"),
+
         col("CURRENCY"),
+
         col("CGL"),
 
         # ==============================================
@@ -336,10 +355,14 @@ def process_date(
     )
 
     print("=========== FINAL DF ===========")
+
     final_df.show(200, False)
 
+    print("=========== FINAL DF COUNT ===========")
+    print(final_df.count())
+
     # ======================================================
-    # DELETE OLD RECORDS FOR SAME DATE
+    # delete existing records for same date
     # ======================================================
     print(f"Deleting old data for {run_date}")
 
@@ -364,6 +387,7 @@ def process_date(
     conn.commit()
 
     stmt.close()
+
     conn.close()
 
     print(f"Old records deleted for {run_date}")
@@ -402,7 +426,7 @@ def main(args):
         jdbc_url = get_jdbc_url()
 
         # ======================================================
-        # ALWAYS START FROM MIN DATE
+        # get minimum balance date
         # ======================================================
         min_date_df = read_oracle(
             spark,
@@ -419,7 +443,7 @@ def main(args):
         start_date = min_date_df.collect()[0]["MIN_DATE"]
 
         # ======================================================
-        # latest available GL_BALANCE date
+        # get latest balance date
         # ======================================================
         latest_balance_df = read_oracle(
             spark,
@@ -478,14 +502,35 @@ def main(args):
 
         while current_date <= end_date:
 
-            process_date(
-                spark,
-                process_run_id,
-                current_date,
-                oracle_properties,
-                jdbc_url
-            )
+            try:
 
+                print("====================================")
+                print(f"STARTING DATE : {current_date}")
+                print("====================================")
+
+                process_date(
+                    spark,
+                    process_run_id,
+                    current_date,
+                    oracle_properties,
+                    jdbc_url
+                )
+
+                print("====================================")
+                print(f"COMPLETED DATE : {current_date}")
+                print("====================================")
+
+            except Exception as e:
+
+                print("====================================")
+                print(f"ERROR IN DATE : {current_date}")
+                print(str(e))
+                traceback.print_exc()
+                print("====================================")
+
+            # ==================================================
+            # move to next date ALWAYS
+            # ==================================================
             current_date = (
                 current_date + timedelta(days=1)
             )
