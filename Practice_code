@@ -1,14 +1,18 @@
 from pyspark.sql import SparkSession
+
 from pyspark.sql.functions import (
     col,
     lit,
     coalesce,
     when,
-    round
+    round,
+    sum,
+    to_date
 )
 
 import traceback
 import sys
+
 from datetime import timedelta
 
 # ======================================================
@@ -74,16 +78,19 @@ def process_date(
     )
 
     # ======================================================
-    # remove duplicates
+    # aggregate duplicates
     # ======================================================
-    today_df = today_df.dropDuplicates([
+    today_df = today_df.groupBy(
         "BRANCH_CODE",
         "CURRENCY",
         "CGL"
-    ])
+    ).agg(
+        sum("T_BAL").alias("T_BAL"),
+        sum("T_INR_BAL").alias("T_INR_BAL")
+    )
 
-    print("=========== TODAY DF ===========")
-    today_df.show(100, False)
+    print("TODAY DF COUNT")
+    print(today_df.count())
 
     # ======================================================
     # yesterday data
@@ -109,16 +116,19 @@ def process_date(
     )
 
     # ======================================================
-    # remove duplicates
+    # aggregate duplicates
     # ======================================================
-    yest_df = yest_df.dropDuplicates([
+    yest_df = yest_df.groupBy(
         "BRANCH_CODE",
         "CURRENCY",
         "CGL"
-    ])
+    ).agg(
+        sum("Y_BAL").alias("Y_BAL"),
+        sum("Y_INR_BAL").alias("Y_INR_BAL")
+    )
 
-    print("=========== YESTERDAY DF ===========")
-    yest_df.show(100, False)
+    print("YESTERDAY DF COUNT")
+    print(yest_df.count())
 
     # ======================================================
     # previous FIRST_ERROR_DATE
@@ -154,8 +164,8 @@ def process_date(
         """
     )
 
-    print("=========== EXISTING DF ===========")
-    existing_df.show(100, False)
+    print("EXISTING DF COUNT")
+    print(existing_df.count())
 
     # ======================================================
     # full outer join
@@ -170,8 +180,8 @@ def process_date(
         how="full_outer"
     )
 
-    print("=========== JOINED DF ===========")
-    joined_df.show(100, False)
+    print("JOINED DF COUNT")
+    print(joined_df.count())
 
     # ======================================================
     # TYPE logic
@@ -254,8 +264,12 @@ def process_date(
         )
     )
 
-    print("=========== TYPE DF ===========")
-    result_df.show(100, False)
+    # ======================================================
+    # TYPE COUNTS
+    # ======================================================
+    print("=========== TYPE COUNTS ===========")
+
+    result_df.groupBy("TYPE").count().show()
 
     # ======================================================
     # join previous FIRST_ERROR_DATE
@@ -269,9 +283,6 @@ def process_date(
         ],
         how="left"
     )
-
-    print("=========== AFTER EXISTING JOIN ===========")
-    result_df.show(100, False)
 
     # ======================================================
     # FIRST_ERROR_DATE logic
@@ -303,9 +314,6 @@ def process_date(
         )
     )
 
-    print("=========== FIRST ERROR DATE DF ===========")
-    result_df.show(100, False)
-
     # ======================================================
     # remove ignored rows
     # ======================================================
@@ -313,15 +321,18 @@ def process_date(
         col("TYPE") != "IGNORE"
     )
 
-    print("=========== FILTERED DF ===========")
-    result_df.show(100, False)
+    print("FILTERED DF COUNT")
+    print(result_df.count())
 
     # ======================================================
     # final dataframe
     # ======================================================
     final_df = result_df.select(
 
-        lit(current_date).alias("BALANCE_DATE"),
+        to_date(
+            lit(run_date),
+            "dd-MM-yyyy"
+        ).alias("BALANCE_DATE"),
 
         col("BRANCH_CODE"),
 
@@ -354,12 +365,17 @@ def process_date(
         )
     )
 
-    print("=========== FINAL DF ===========")
-
-    final_df.show(200, False)
-
-    print("=========== FINAL DF COUNT ===========")
+    print("FINAL DF COUNT")
     print(final_df.count())
+
+    # ======================================================
+    # skip if no data
+    # ======================================================
+    if final_df.count() == 0:
+
+        print(f"No records to insert for {run_date}")
+
+        return
 
     # ======================================================
     # delete existing records for same date
@@ -459,6 +475,12 @@ def main(args):
 
         end_date = latest_balance_df.collect()[0]["MAX_BAL_DATE"]
 
+        if end_date is None:
+
+            raise Exception(
+                "No MAX_BAL_DATE found in GL_BALANCE"
+            )
+
         print(f"START DATE : {start_date}")
 
         print(f"END DATE   : {end_date}")
@@ -528,6 +550,20 @@ def main(args):
                 traceback.print_exc()
                 print("====================================")
 
+                # ============================================
+                # stop loop if spark context stopped
+                # ============================================
+                if (
+                    "SparkContext" in str(e)
+                    or
+                    "stopped SparkContext" in str(e)
+                ):
+
+                    print("SparkContext stopped.")
+                    print("Breaking loop.")
+
+                    break
+
             # ==================================================
             # move to next date ALWAYS
             # ==================================================
@@ -548,7 +584,7 @@ def main(args):
 
         spark.stop()
 
-        sys.exit(0)
+        return
 
     except Exception:
 
@@ -572,7 +608,7 @@ def main(args):
         except:
             pass
 
-        sys.exit(1)
+        return
 
 
 # ======================================================
