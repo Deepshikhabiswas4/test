@@ -1,619 +1,83 @@
-from pyspark.sql import SparkSession
-
-from pyspark.sql.functions import (
-    col,
-    lit,
-    coalesce,
-    when,
-    round,
-    sum,
-    to_date
-)
-
+from pyspark.sql import SparkSession, functions as F, types as T
+from pyspark.sql.functions import col, lit, current_timestamp, coalesce, when, substring, expr,concat, to_date,count ,to_json ,struct
+from pyspark.sql.functions import collect_list, struct, to_json, sum , broadcast
 import traceback
 import sys
-
-from datetime import timedelta
-
-# ======================================================
-# common imports
-# ======================================================
-import common.constants as constants
-
-from common.properties import (
-    get_oracle_properties,
-    get_jdbc_url
-)
-
+from datetime import date,timedelta
+from pyspark.sql.functions import desc
+# =========== Common Methods =============================
+import common.constants  as constants
+from common.properties import get_oracle_properties,get_jdbc_url
+from common.dateUtil import get_etl_date
 from common.processRun import get_process_run_id
-
 from common.log_etl_modified import log_etl
-
 from common.read_write_oracle import read_oracle
+from common.fileUtil import tables_to_read
 
+INSERT=0
+UPDATE=1
 
-# ======================================================
-# process one date
-# ======================================================
-def process_date(
-    spark,
-    process_run_id,
-    current_date,
-    oracle_properties,
-    jdbc_url
-):
-
-    run_date = current_date.strftime("%d-%m-%Y")
-
-    yesterday = (
-        current_date - timedelta(days=1)
-    ).strftime("%d-%m-%Y")
-
-    print("=================================================")
-    print(f"PROCESSING DATE : {run_date}")
-    print(f"YESTERDAY DATE  : {yesterday}")
-    print("=================================================")
-
-    # ======================================================
-    # today data
-    # ======================================================
-    today_df = read_oracle(
-        spark,
-        f"""
-        (
-            SELECT
-                BRANCH_CODE,
-                CURRENCY,
-                CGL,
-                BALANCE AS T_BAL,
-                INR_BALANCE AS T_INR_BAL
-            FROM GL_BALANCE
-            WHERE CGL IN ('1111111111')
-            AND BALANCE_DATE = TO_DATE(
-                '{run_date}',
-                'DD-MM-YYYY'
-            )
-        ) T
-        """
-    )
-
-    # ======================================================
-    # aggregate duplicates
-    # ======================================================
-    today_df = today_df.groupBy(
-        "BRANCH_CODE",
-        "CURRENCY",
-        "CGL"
-    ).agg(
-        sum("T_BAL").alias("T_BAL"),
-        sum("T_INR_BAL").alias("T_INR_BAL")
-    )
-
-    print("TODAY DF COUNT")
-    print(today_df.count())
-
-    # ======================================================
-    # yesterday data
-    # ======================================================
-    yest_df = read_oracle(
-        spark,
-        f"""
-        (
-            SELECT
-                BRANCH_CODE,
-                CURRENCY,
-                CGL,
-                BALANCE AS Y_BAL,
-                INR_BALANCE AS Y_INR_BAL
-            FROM GL_BALANCE
-            WHERE CGL IN ('1111111111')
-            AND BALANCE_DATE = TO_DATE(
-                '{yesterday}',
-                'DD-MM-YYYY'
-            )
-        ) Y
-        """
-    )
-
-    # ======================================================
-    # aggregate duplicates
-    # ======================================================
-    yest_df = yest_df.groupBy(
-        "BRANCH_CODE",
-        "CURRENCY",
-        "CGL"
-    ).agg(
-        sum("Y_BAL").alias("Y_BAL"),
-        sum("Y_INR_BAL").alias("Y_INR_BAL")
-    )
-
-    print("YESTERDAY DF COUNT")
-    print(yest_df.count())
-
-    # ======================================================
-    # previous FIRST_ERROR_DATE
-    # ======================================================
-    existing_df = read_oracle(
-        spark,
-        """
-        (
-            SELECT
-                BRANCH_CODE,
-                CURRENCY,
-                CGL,
-                FIRST_ERROR_DATE
-            FROM
-            (
-                SELECT
-                    BRANCH_CODE,
-                    CURRENCY,
-                    CGL,
-                    FIRST_ERROR_DATE,
-                    ROW_NUMBER() OVER
-                    (
-                        PARTITION BY
-                            BRANCH_CODE,
-                            CURRENCY,
-                            CGL
-                        ORDER BY BALANCE_DATE DESC
-                    ) rn
-                FROM GL_BALANCE_DIFFERENCE
-            )
-            WHERE rn = 1
-        ) E
-        """
-    )
-
-    print("EXISTING DF COUNT")
-    print(existing_df.count())
-
-    # ======================================================
-    # full outer join
-    # ======================================================
-    joined_df = today_df.alias("t").join(
-        yest_df.alias("y"),
-        on=[
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL"
-        ],
-        how="full_outer"
-    )
-
-    print("JOINED DF COUNT")
-    print(joined_df.count())
-
-    # ======================================================
-    # TYPE logic
-    # ======================================================
-    result_df = joined_df.withColumn(
-
-        "TYPE",
-
-        # ==================================================
-        # NEW_ENTRY
-        # ==================================================
-        when(
-            (
-                coalesce(col("Y_BAL"), lit(0)) == 0
-            ) &
-            (
-                coalesce(col("T_BAL"), lit(0)) != 0
-            ),
-
-            lit("NEW_ENTRY")
-        )
-
-        # ==================================================
-        # DIFFERENCE
-        # ==================================================
-        .when(
-            (
-                coalesce(col("Y_BAL"), lit(0)) != 0
-            ) &
-            (
-                coalesce(col("T_BAL"), lit(0)) != 0
-            ) &
-            (
-                round(col("Y_BAL"), 2)
-                !=
-                round(col("T_BAL"), 2)
-            ),
-
-            lit("DIFFERENCE")
-        )
-
-        # ==================================================
-        # CLOSED
-        # ==================================================
-        .when(
-            (
-                coalesce(col("Y_BAL"), lit(0)) != 0
-            ) &
-            (
-                coalesce(col("T_BAL"), lit(0)) == 0
-            ),
-
-            lit("CLOSED")
-        )
-
-        # ==================================================
-        # ZERO_DIFFERENCE
-        # ==================================================
-        .when(
-            (
-                coalesce(col("Y_BAL"), lit(0)) != 0
-            ) &
-            (
-                coalesce(col("T_BAL"), lit(0)) != 0
-            ) &
-            (
-                round(col("Y_BAL"), 2)
-                ==
-                round(col("T_BAL"), 2)
-            ),
-
-            lit("ZERO_DIFFERENCE")
-        )
-
-        # ==================================================
-        # IGNORE
-        # ==================================================
-        .otherwise(
-            lit("IGNORE")
-        )
-    )
-
-    # ======================================================
-    # TYPE COUNTS
-    # ======================================================
-    print("=========== TYPE COUNTS ===========")
-
-    result_df.groupBy("TYPE").count().show()
-
-    # ======================================================
-    # join previous FIRST_ERROR_DATE
-    # ======================================================
-    result_df = result_df.join(
-        existing_df,
-        on=[
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL"
-        ],
-        how="left"
-    )
-
-    # ======================================================
-    # FIRST_ERROR_DATE logic
-    # ======================================================
-    result_df = result_df.withColumn(
-
-        "FINAL_FIRST_ERROR_DATE",
-
-        when(
-            col("TYPE") == "NEW_ENTRY",
-            lit(current_date)
-        )
-
-        .when(
-            col("TYPE").isin(
-                "DIFFERENCE",
-                "ZERO_DIFFERENCE",
-                "CLOSED"
-            ),
-
-            coalesce(
-                col("FIRST_ERROR_DATE"),
-                lit(current_date)
-            )
-        )
-
-        .otherwise(
-            lit(current_date)
-        )
-    )
-
-    # ======================================================
-    # remove ignored rows
-    # ======================================================
-    result_df = result_df.filter(
-        col("TYPE") != "IGNORE"
-    )
-
-    print("FILTERED DF COUNT")
-    print(result_df.count())
-
-    # ======================================================
-    # final dataframe
-    # ======================================================
-    final_df = result_df.select(
-
-        to_date(
-            lit(run_date),
-            "dd-MM-yyyy"
-        ).alias("BALANCE_DATE"),
-
-        col("BRANCH_CODE"),
-
-        col("CURRENCY"),
-
-        col("CGL"),
-
-        # ==============================================
-        # balance difference
-        # ==============================================
-        (
-            coalesce(col("Y_BAL"), lit(0))
-            -
-            coalesce(col("T_BAL"), lit(0))
-        ).alias("BALANCE"),
-
-        # ==============================================
-        # INR balance difference
-        # ==============================================
-        (
-            coalesce(col("Y_INR_BAL"), lit(0))
-            -
-            coalesce(col("T_INR_BAL"), lit(0))
-        ).alias("INR_BALANCE"),
-
-        col("TYPE"),
-
-        col("FINAL_FIRST_ERROR_DATE").alias(
-            "FIRST_ERROR_DATE"
-        )
-    )
-
-    print("FINAL DF COUNT")
-    print(final_df.count())
-
-    # ======================================================
-    # skip if no data
-    # ======================================================
-    if final_df.count() == 0:
-
-        print(f"No records to insert for {run_date}")
-
-        return
-
-    # ======================================================
-    # delete existing records for same date
-    # ======================================================
-    print(f"Deleting old data for {run_date}")
-
-    conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
-        jdbc_url,
-        oracle_properties["user"],
-        oracle_properties["password"]
-    )
-
-    stmt = conn.createStatement()
-
-    stmt.execute(
-        f"""
-        DELETE FROM GL_BALANCE_DIFFERENCE
-        WHERE BALANCE_DATE = TO_DATE(
-            '{run_date}',
-            'DD-MM-YYYY'
-        )
-        """
-    )
-
-    conn.commit()
-
-    stmt.close()
-
-    conn.close()
-
-    print(f"Old records deleted for {run_date}")
-
-    # ======================================================
-    # write to oracle
-    # ======================================================
-    final_df.write.jdbc(
-        url=jdbc_url,
-        table="GL_BALANCE_DIFFERENCE",
-        mode="append",
-        properties=oracle_properties
-    )
-
-    print(f"SUCCESSFULLY COMPLETED FOR DATE : {run_date}")
-
-
-# ======================================================
-# main
-# ======================================================
 def main(args):
-
-    spark = None
-
+    
     try:
+        
+         spark = (SparkSession.builder.appName("CNTR_SUMMARY_COUNT_SCRIPT").getOrCreate())        
+        
+         oracle_properties=get_oracle_properties()
 
-        # ======================================================
-        # spark session
-        # ======================================================
-        spark = SparkSession.builder.appName(
-            "GL_BALANCE_DIFFERENCE"
-        ).getOrCreate()
+         oracle_tables = tables_to_read("glif")
+         TRANSACTIONS = oracle_tables["TRANSACTIONS"]
+         BALANCE = oracle_tables["BALANCE"]
 
-        oracle_properties = get_oracle_properties()
+         today = get_etl_date(spark)
+         run_date= today.strftime("%d-%m-%Y")
+         PROCESS_ID= getattr(constants,"DIFFERENCE_PIPELINE_ID",3)
+         process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,run_date)
+         print(f"Process RunId: {process_run_id}")         
+        
+         print(today)
+         print(run_date)
+         log_etl(spark,process_run_id,"cntr_summary_started",1,"generating cntr_summary.")
+         
+         query = f"""(select cgl, currency,count(1) as count
+                        from {BALANCE} 
+                        WHERE cgl IN ('1260505001', '1260505003', '1111111111') and 
+                        BALANCE_DATE= TO_DATE('{run_date}', 'DD-MM-YYYY') and BALANCE <> 0  
+                        group by  cgl, currency) t"""
 
-        jdbc_url = get_jdbc_url()
+         jdbc_url = get_jdbc_url()
+         oracle_properties = get_oracle_properties()
+        #  result_df = spark.read.jdbc(url=jdbc_url, table=query, properties=oracle_properties)
+         result_df = read_oracle(spark,query)
+         summary_df = result_df.select(collect_list(
+                                           struct("cgl", "currency", "count")
+                                       ).alias("summary"))
+         
+         final_df = summary_df.select(lit("CNTR Summary").alias("Summary Name"),
+                                       lit(run_date).alias("date"),
+                                       "summary")
+         
+         final_json = final_df.selectExpr("to_json(struct(*)) AS value").first()["value"]
 
-        # ======================================================
-        # get minimum balance date
-        # ======================================================
-        min_date_df = read_oracle(
-            spark,
-            """
-            (
-                SELECT
-                    MIN(BALANCE_DATE) AS MIN_DATE
-                FROM GL_BALANCE
-                WHERE CGL IN ('1111111111')
-            ) M
-            """
-        )
+         log_etl(spark,process_run_id,"cntr_summary_calculated",2,"cntr Summary Succesfully Calculated",0,final_json)
+         log_etl(spark,process_run_id,"cntr_summary_started",2,"cntr_summary generation completed.")
+         print(final_json)
+         spark.stop()
+         sys.exit(0)
 
-        start_date = min_date_df.collect()[0]["MIN_DATE"]
-
-        # ======================================================
-        # get latest balance date
-        # ======================================================
-        latest_balance_df = read_oracle(
-            spark,
-            """
-            (
-                SELECT
-                    MAX(BALANCE_DATE) AS MAX_BAL_DATE
-                FROM GL_BALANCE
-                WHERE CGL IN ('1111111111')
-            ) L
-            """
-        )
-
-        end_date = latest_balance_df.collect()[0]["MAX_BAL_DATE"]
-
-        if end_date is None:
-
-            raise Exception(
-                "No MAX_BAL_DATE found in GL_BALANCE"
-            )
-
-        print(f"START DATE : {start_date}")
-
-        print(f"END DATE   : {end_date}")
-
-        # ======================================================
-        # process id
-        # ======================================================
-        PROCESS_ID = getattr(
-            constants,
-            "DIFFERENCE_PIPELINE_ID",
-            3
-        )
-
-        process_run_id = (
-            sys.argv[1]
-            if len(sys.argv) > 1
-            else get_process_run_id(
-                spark,
-                PROCESS_ID,
-                start_date.strftime("%d-%m-%Y")
-            )
-        )
-
-        print(f"Process RunId : {process_run_id}")
-
-        # ======================================================
-        # ETL START LOG
-        # ======================================================
-        log_etl(
-            spark,
-            process_run_id,
-            "gl_balance_difference_started",
-            1,
-            "GL balance difference started"
-        )
-
-        # ======================================================
-        # loop through all dates
-        # ======================================================
-        current_date = start_date
-
-        while current_date <= end_date:
-
-            try:
-
-                print("====================================")
-                print(f"STARTING DATE : {current_date}")
-                print("====================================")
-
-                process_date(
-                    spark,
-                    process_run_id,
-                    current_date,
-                    oracle_properties,
-                    jdbc_url
-                )
-
-                print("====================================")
-                print(f"COMPLETED DATE : {current_date}")
-                print("====================================")
-
-            except Exception as e:
-
-                print("====================================")
-                print(f"ERROR IN DATE : {current_date}")
-                print(str(e))
-                traceback.print_exc()
-                print("====================================")
-
-                # ============================================
-                # stop loop if spark context stopped
-                # ============================================
-                if (
-                    "SparkContext" in str(e)
-                    or
-                    "stopped SparkContext" in str(e)
-                ):
-
-                    print("SparkContext stopped.")
-                    print("Breaking loop.")
-
-                    break
-
-            # ==================================================
-            # move to next date ALWAYS
-            # ==================================================
-            current_date = (
-                current_date + timedelta(days=1)
-            )
-
-        # ======================================================
-        # ETL SUCCESS LOG
-        # ======================================================
-        log_etl(
-            spark,
-            process_run_id,
-            "gl_balance_difference_completed",
-            2,
-            "GL balance difference completed successfully"
-        )
-
-        spark.stop()
-
-        return
-
-    except Exception:
-
+         
+        
+    except Exception as e:
+        print("ERROR during reconciliation:")
+        log_etl(spark,process_run_id,"cntr_summary_calculated",3,"Error while calculating cntr_Summary.")
+        log_etl(spark,process_run_id,"cntr_summary_started",3,"Error while generating cntr_summary.")
         traceback.print_exc()
-
-        try:
-
-            log_etl(
-                spark,
-                process_run_id,
-                "gl_balance_difference_failed",
-                3,
-                "Error in GL balance difference"
-            )
-
-        except:
-            pass
-
         try:
             spark.stop()
         except:
             pass
+        sys.exit(1)
+        
 
-        return
-
-
-# ======================================================
-# driver
-# ======================================================
-if __name__ == "__main__":
-
+if __name__=="__main__":
     main(sys.argv)
