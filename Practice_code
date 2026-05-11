@@ -1,69 +1,153 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, lit, coalesce, when
+    col,
+    lit,
+    coalesce,
+    when,
+    collect_list,
+    struct,
+    round,
+    current_timestamp
 )
+
 import traceback
 import sys
 from datetime import timedelta
 
-# =========== Common Methods =============================
+# ======================================================
+# Common Methods
+# ======================================================
 import common.constants as constants
-from common.properties import get_oracle_properties, get_jdbc_url
+
+from common.properties import (
+    get_oracle_properties,
+    get_jdbc_url
+)
+
 from common.dateUtil import get_etl_date
+
 from common.processRun import get_process_run_id
+
 from common.log_etl_modified import log_etl
+
 from common.read_write_oracle import read_oracle
+
 from common.fileUtil import tables_to_read
 
 
+# ======================================================
+# MAIN
+# ======================================================
 def main(args):
+
+    spark = None
+
     try:
 
         # ======================================================
-        # spark session
+        # Spark Session
         # ======================================================
-        spark = SparkSession.builder.appName(
-            "GL_BALANCE_DIFFERENCE"
-        ).getOrCreate()
+        spark = (
+            SparkSession.builder
+            .appName("CNTR_GL_BALANCE_DIFFERENCE")
+            .getOrCreate()
+        )
 
-        oracle_properties = get_oracle_properties()
         jdbc_url = get_jdbc_url()
 
+        oracle_properties = get_oracle_properties()
+
         oracle_tables = tables_to_read("glif")
+
         BALANCE = oracle_tables["BALANCE"]
 
+        # ======================================================
+        # ETL DATE
+        # ======================================================
         today = get_etl_date(spark)
 
         run_date = today.strftime("%d-%m-%Y")
-        yesterday = (today - timedelta(days=1)).strftime("%d-%m-%Y")
 
-        print(f"RUN DATE      : {run_date}")
-        print(f"YESTERDAY DATE: {yesterday}")
+        yesterday = (
+            today - timedelta(days=1)
+        ).strftime("%d-%m-%Y")
 
-        PROCESS_ID = getattr(constants, "DIFFERENCE_PIPELINE_ID", 3)
+        print(f"RUN DATE       : {run_date}")
+
+        print(f"YESTERDAY DATE : {yesterday}")
+
+        # ======================================================
+        # PROCESS ID
+        # ======================================================
+        PROCESS_ID = getattr(
+            constants,
+            "DIFFERENCE_PIPELINE_ID",
+            3
+        )
 
         process_run_id = (
             sys.argv[1]
             if len(sys.argv) > 1
-            else get_process_run_id(spark, PROCESS_ID, run_date)
+            else get_process_run_id(
+                spark,
+                PROCESS_ID,
+                run_date
+            )
         )
 
-        print(f"Process RunId: {process_run_id}")
-        
+        print(f"Process RunId : {process_run_id}")
+
+        # ======================================================
+        # ETL START LOG
+        # ======================================================
         log_etl(
             spark,
             process_run_id,
-            "gl_balance_difference_started",
+            "cntr_summary_started",
             1,
-            "GL balance difference started"
+            "Generating CNTR Summary"
         )
 
         # ======================================================
-        # today data
+        # CGL LIST
+        # ======================================================
+        cgl_list = """
+        '1111111111',
+        '1111111112',
+        '1260505001',
+        '2148505001',
+        '1260505003',
+        '1148505004',
+        '1148505005',
+        '1148505006',
+        '1148505007',
+        '1148505010',
+        '1148505012',
+        '1148505014',
+        '1148505020',
+        '2148505004',
+        '2148505006',
+        '2148505007',
+        '2148505010',
+        '2148505011',
+        '2148505014',
+        '2148505016',
+        '2148505018',
+        '2148505019',
+        '2148505021',
+        '2148505022',
+        '2148505024',
+        '2148505033',
+        '2148505035',
+        '1260505002'
+        """
+
+        # ======================================================
+        # TODAY DATA
         # ======================================================
         today_df = read_oracle(
             spark,
-            f"""   
+            f"""
             (
                 SELECT
                     BRANCH_CODE,
@@ -71,23 +155,18 @@ def main(args):
                     CGL,
                     BALANCE AS T_BAL,
                     INR_BALANCE AS T_INR_BAL
-                FROM GL_BALANCE
-                WHERE CGL IN ('1111111111','1111111112', '1260505001', '2148505001', '1260505003',
-        '1148505004', '1148505005', '1148505006', '1148505007', '1148505010',
-        '1148505012', '1148505014', '1148505020', '2148505004', '2148505006',
-        '2148505007', '2148505010', '2148505011', '2148505014', '2148505016',
-        '2148505018', '2148505019', '2148505021', '2148505022', '2148505024',
-        '2148505033', '2148505035', '1260505002')
-                AND BALANCE_DATE = TO_DATE('{run_date}', 'DD-MM-YYYY')
+                FROM {BALANCE}
+                WHERE CGL IN ({cgl_list})
+                AND BALANCE_DATE = TO_DATE(
+                    '{run_date}',
+                    'DD-MM-YYYY'
+                )
             ) T
             """
         )
 
-        print("=========== TODAY DF ===========")
-        today_df.show(100, False)
-
         # ======================================================
-        # yesterday data
+        # YESTERDAY DATA
         # ======================================================
         yest_df = read_oracle(
             spark,
@@ -99,24 +178,18 @@ def main(args):
                     CGL,
                     BALANCE AS Y_BAL,
                     INR_BALANCE AS Y_INR_BAL
-                FROM GL_BALANCE
-                WHERE CGL IN ('1111111111','1111111112', '1260505001', '2148505001', '1260505003',
-        '1148505004', '1148505005', '1148505006', '1148505007', '1148505010',
-        '1148505012', '1148505014', '1148505020', '2148505004', '2148505006',
-        '2148505007', '2148505010', '2148505011', '2148505014', '2148505016',
-        '2148505018', '2148505019', '2148505021', '2148505022', '2148505024',
-        '2148505033', '2148505035', '1260505002')
-                AND BALANCE_DATE = TO_DATE('{yesterday}', 'DD-MM-YYYY')
+                FROM {BALANCE}
+                WHERE CGL IN ({cgl_list})
+                AND BALANCE_DATE = TO_DATE(
+                    '{yesterday}',
+                    'DD-MM-YYYY'
+                )
             ) Y
             """
         )
 
-        print("=========== YESTERDAY DF ===========")
-        yest_df.show(100, False)
-
         # ======================================================
-        # latest existing record
-        # needed for carrying FIRST_ERROR_DATE
+        # EXISTING FIRST ERROR DATE
         # ======================================================
         existing_df = read_oracle(
             spark,
@@ -136,7 +209,10 @@ def main(args):
                         FIRST_ERROR_DATE,
                         ROW_NUMBER() OVER
                         (
-                            PARTITION BY BRANCH_CODE, CURRENCY, CGL
+                            PARTITION BY
+                                BRANCH_CODE,
+                                CURRENCY,
+                                CGL
                             ORDER BY BALANCE_DATE DESC
                         ) rn
                     FROM GL_BALANCE_DIFFERENCE
@@ -146,129 +222,169 @@ def main(args):
             """
         )
 
-        print("=========== EXISTING DF ===========")
-        existing_df.show(100, False)
-
+        # ======================================================
+        # JOIN
+        # ======================================================
         joined_df = today_df.alias("t").join(
             yest_df.alias("y"),
-            on=["BRANCH_CODE", "CURRENCY", "CGL"],
+            on=[
+                "BRANCH_CODE",
+                "CURRENCY",
+                "CGL"
+            ],
             how="full_outer"
         )
 
-        print("=========== JOINED DF ===========")
-        joined_df.show(100, False)
-
         # ======================================================
-        # Type logic
+        # TYPE LOGIC
         # ======================================================
         result_df = joined_df.withColumn(
+
             "TYPE",
+
             when(
-                (coalesce(col("Y_BAL"), lit(0)) == 0) &
-                (coalesce(col("T_BAL"), lit(0)) != 0),
+                (
+                    coalesce(col("Y_BAL"), lit(0)) == 0
+                ) &
+                (
+                    coalesce(col("T_BAL"), lit(0)) != 0
+                ),
 
                 lit("NEW_ENTRY")
             )
+
             .when(
-                (coalesce(col("Y_BAL"), lit(0)) != 0) &
-                (coalesce(col("T_BAL"), lit(0)) != 0) &
                 (
-                    (col("Y_BAL") != col("T_BAL")) |
-                    (col("Y_INR_BAL") != col("T_INR_BAL"))
+                    coalesce(col("Y_BAL"), lit(0)) != 0
+                ) &
+                (
+                    coalesce(col("T_BAL"), lit(0)) != 0
+                ) &
+                (
+                    (
+                        round(col("Y_BAL"), 2)
+                        !=
+                        round(col("T_BAL"), 2)
+                    )
+                    |
+                    (
+                        round(col("Y_INR_BAL"), 2)
+                        !=
+                        round(col("T_INR_BAL"), 2)
+                    )
                 ),
 
                 lit("DIFFERENCE")
             )
+
             .when(
-                (coalesce(col("Y_BAL"), lit(0)) != 0) &
-                (coalesce(col("T_BAL"), lit(0)) == 0),
+                (
+                    coalesce(col("Y_BAL"), lit(0)) != 0
+                ) &
+                (
+                    coalesce(col("T_BAL"), lit(0)) == 0
+                ),
 
                 lit("CLOSED")
             )
+
             .when(
-                (coalesce(col("Y_BAL"), lit(0)) != 0) &
-                (coalesce(col("T_BAL"), lit(0)) != 0) &
-                (col("Y_BAL")==col("T_BAL")),
+                (
+                    coalesce(col("Y_BAL"), lit(0)) != 0
+                ) &
+                (
+                    coalesce(col("T_BAL"), lit(0)) != 0
+                ) &
+                (
+                    round(col("Y_BAL"), 2)
+                    ==
+                    round(col("T_BAL"), 2)
+                ) &
+                (
+                    round(col("Y_INR_BAL"), 2)
+                    ==
+                    round(col("T_INR_BAL"), 2)
+                ),
 
                 lit("ZERO_DIFFERENCE")
             )
+
             .otherwise(
                 lit("IGNORE")
             )
         )
 
-        print("=========== TYPE DF ===========")
-        result_df.show(100, False)
-
         # ======================================================
-        # join existing FIRST_ERROR_DATE
+        # JOIN FIRST ERROR DATE
         # ======================================================
         result_df = result_df.join(
             existing_df,
-            on=["BRANCH_CODE", "CURRENCY", "CGL"],
+            on=[
+                "BRANCH_CODE",
+                "CURRENCY",
+                "CGL"
+            ],
             how="left"
         )
 
-        print("=========== AFTER EXISTING JOIN ===========")
-        result_df.show(100, False)
-
         # ======================================================
-        # first_error_date logic
-        # new_entry -> today
-        # difference -> today
-        # zero_difference-> previous first_error_date
-        # closed -> previous first_error_date
+        # FINAL FIRST ERROR DATE
         # ======================================================
         result_df = result_df.withColumn(
+
             "FINAL_FIRST_ERROR_DATE",
 
             when(
-                col("TYPE")=="NEW_ENTRY",
+                col("TYPE") == "NEW_ENTRY",
                 lit(today)
-            ).when(
-                col("TYPE").isin("DIFFERENCE", "ZERO_DIFFERENCE", "CLOSED"),
-                coalesce(col("FIRST_ERROR_DATE"), lit(today))
+            )
+
+            .when(
+                col("TYPE").isin(
+                    "DIFFERENCE",
+                    "ZERO_DIFFERENCE",
+                    "CLOSED"
+                ),
+
+                coalesce(
+                    col("FIRST_ERROR_DATE"),
+                    lit(today)
+                )
+            )
+
+            .otherwise(
+                lit(today)
             )
         )
 
-        print("=========== FIRST ERROR DATE DF ===========")
-        result_df.show(100, False)
-
-
-        result_df=result_df.filter(
-            col("TYPE")!="IGNORE"
+        # ======================================================
+        # REMOVE IGNORE
+        # ======================================================
+        result_df = result_df.filter(
+            col("TYPE") != "IGNORE"
         )
 
-        print("=========== FINAL RESULT DF ===========")
-        result_df.show(100, False)
-
-
-
         # ======================================================
-        # final dataframe
+        # FINAL DETAIL DF
         # ======================================================
         final_df = result_df.select(
+
             lit(today).alias("BALANCE_DATE"),
 
             col("BRANCH_CODE"),
+
             col("CURRENCY"),
+
             col("CGL"),
 
-            (
-                coalesce(col("T_BAL"), lit(0))
-                # -
-                # coalesce(col("Y_BAL"), lit(0))
+            coalesce(
+                col("T_BAL"),
+                lit(0)
             ).alias("BALANCE"),
 
-            (
-                coalesce(
+            coalesce(
                 col("T_INR_BAL"),
-                lit(0))
-                # -
-                # coalesce(
-                # col("Y_INR_BAL"),
-                # lit(0))
-
+                lit(0)
             ).alias("INR_BALANCE"),
 
             col("TYPE"),
@@ -278,11 +394,35 @@ def main(args):
             )
         )
 
-        print("=========== FINAL DF ===========")
-        final_df.show(200, False)
+        # ======================================================
+        # DELETE OLD DATA
+        # ======================================================
+        conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
+            jdbc_url,
+            oracle_properties["user"],
+            oracle_properties["password"]
+        )
+
+        stmt = conn.createStatement()
+
+        stmt.execute(
+            f"""
+            DELETE FROM GL_BALANCE_DIFFERENCE
+            WHERE BALANCE_DATE = TO_DATE(
+                '{run_date}',
+                'DD-MM-YYYY'
+            )
+            """
+        )
+
+        conn.commit()
+
+        stmt.close()
+
+        conn.close()
 
         # ======================================================
-        # write to oracle
+        # WRITE DETAIL TABLE
         # ======================================================
         final_df.write.jdbc(
             url=jdbc_url,
@@ -291,30 +431,102 @@ def main(args):
             properties=oracle_properties
         )
 
+        print("GL_BALANCE_DIFFERENCE INSERTED")
+
+        # ======================================================
+        # CNTR SUMMARY
+        # ======================================================
+        summary_query = f"""
+        (
+            SELECT
+                CGL,
+                CURRENCY,
+                COUNT(1) AS COUNT
+            FROM GL_BALANCE_DIFFERENCE
+            WHERE BALANCE_DATE = TO_DATE(
+                '{run_date}',
+                'DD-MM-YYYY'
+            )
+            GROUP BY CGL, CURRENCY
+        ) X
+        """
+
+        summary_result_df = read_oracle(
+            spark,
+            summary_query
+        )
+
+        summary_df = summary_result_df.select(
+
+            collect_list(
+
+                struct(
+                    "CGL",
+                    "CURRENCY",
+                    "COUNT"
+                )
+
+            ).alias("summary")
+        )
+
+        final_summary_df = summary_df.select(
+
+            lit("CNTR Summary").alias(
+                "Summary Name"
+            ),
+
+            lit(run_date).alias("date"),
+
+            col("summary")
+        )
+
+        final_json = final_summary_df.selectExpr(
+            "to_json(struct(*)) AS value"
+        ).first()["value"]
+
+        print(final_json)
+
+        # ======================================================
+        # ETL SUCCESS LOG
+        # ======================================================
+        log_etl(
+            spark,
+            process_run_id,
+            "cntr_summary_calculated",
+            2,
+            "CNTR Summary Successfully Calculated",
+            0,
+            final_json
+        )
 
         log_etl(
             spark,
             process_run_id,
-            "gl_balance_difference_completed",
+            "cntr_summary_completed",
             2,
-            "GL balance difference completed successfully"
+            "CNTR Summary generation completed"
         )
 
         spark.stop()
-        sys.exit(0)
 
-    except Exception:
+        return
+
+    except Exception as e:
+
+        print("ERROR during reconciliation")
 
         traceback.print_exc()
 
         try:
+
             log_etl(
                 spark,
                 process_run_id,
-                "gl_balance_difference_failed",
+                "cntr_summary_failed",
                 3,
-                "Error in GL balance difference"
+                f"Error while generating CNTR Summary : {str(e)}"
             )
+
         except:
             pass
 
@@ -323,8 +535,12 @@ def main(args):
         except:
             pass
 
-        sys.exit(1)
+        return
 
 
+# ======================================================
+# DRIVER
+# ======================================================
 if __name__ == "__main__":
+
     main(sys.argv)
