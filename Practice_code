@@ -1,587 +1,364 @@
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.functions import (
-    col,
-    lit,
-    coalesce,
-    when,
-    collect_list,
-    struct
-)
-
+from pyspark.sql import SparkSession, functions as F, types as T 
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, LongType, BinaryType
+from pyspark.sql.functions import col, lit, current_timestamp, coalesce, when, substring, expr,concat, to_date,count ,to_json ,struct,input_file_name,element_at,split,regexp_extract,regexp_replace,concat_ws
+from pyspark.sql.functions import collect_list, struct, to_json, sum , broadcast, lower
+from common.constants import Process
 import traceback
+from confluent_kafka import Producer
 import sys
-
-from datetime import timedelta
-
-# ======================================================
-# Common Methods
-# ======================================================
-import common.constants as constants
-
-from common.properties import (
-    get_oracle_properties,
-    get_jdbc_url
-)
-
-from common.dateUtil import get_etl_date
-
-from common.processRun import get_process_run_id
-
+import math
+from datetime import date, timedelta, datetime
+from pyspark.sql.functions import desc
+import json
+import os
+from py4j.java_gateway import java_import
+import time
+import threading
+from threading import Lock
+import re
+# =========== Common Methods =============================
 from common.log_etl_modified import log_etl
-
-from common.read_write_oracle import read_oracle
-
+from common.properties import get_oracle_properties
+from common.dateUtil import get_etl_date
+from common.fileUtil import files_to_read
+from common.fileUtil import paths_for_read
+from common.processRun import get_run_id
+from common.logger import setup_logger
+from common.fileUtil import get_hdfs_base
+from common.createSpark import create_spark_session
 from common.fileUtil import tables_to_read
+from common.read_write_oracle import write_oracle
+from common.read_write_oracle import read_oracle
+from common.dynamic_file_parsing_modified import process_single_file_dynamic
+from  common.properties import get_kafka_ip
+from common.processRun import get_process_run_id
+from common.fileUtil import get_delta_path_by_file_type
+from common.utilites import create_hdfs_dir
+def monitor_db_and_stop(spark,typeToRead,run_id,count_holder,today,streamType):
+    print("DB monitor thread started...")
+    while True:
+        try: 
+            print("Checking DB status...")
+            check_and_stop_spark(
+                spark,
+                typeToRead,
+                run_id,
+                count_holder,
+                today,
+                streamType
+            )
+        except Exception as e:
+            print("Monitor error:", e)
+        time.sleep(45)  #  tune: 30–60 sec
+
+def create_manifest(spark, filename, manifest_base, etl_date, content):
+
+    # Format date
+    if isinstance(etl_date, str):
+        etl_date_str = etl_date
+    else:
+        etl_date_str = etl_date.strftime("%Y%m%d")
+
+    # Final manifest folder
+    final_manifest_dir = f"{manifest_base.rstrip('/')}/{etl_date_str}"
+
+    print("Final Manifest Path:", final_manifest_dir)
+
+    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
+    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+
+    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
+    Path = spark._jvm.Path
+
+    hdfs_dir = Path(final_manifest_dir)
+
+    # Create ETL folder if not exists
+    if not fs.exists(hdfs_dir):
+        print("Creating ETL folder:", final_manifest_dir)
+        fs.mkdirs(hdfs_dir)
+
+    # Write locally
+    with open(filename, "w") as f:
+        f.write(content)
+
+    dest_path = Path(f"{final_manifest_dir}/{filename}")
+
+    fs.copyFromLocalFile(
+        False,
+        True,
+        Path(filename),
+        dest_path
+    )
+
+    if not fs.exists(dest_path):
+        raise RuntimeError(f"Manifest NOT written: {dest_path}")
+
+    print("Manifest successfully created at:", dest_path)
 
 
-# ======================================================
-# MAIN
-# ======================================================
-def main(args):
 
-    spark = None
-
+def check_and_stop_spark(spark,typeToRead,run_id,count_holder, etl_date,streamType):
+    """
+    Check if all records for given ETL_DATE have DATA_LAKE_COUNT populated.
+    If yes, stop Spark.
+    """
     try:
+        # Read control table
+        query = f"""(SELECT * FROM CONTROLL_FILE_MASTER where FILE_TYPE = '{typeToRead}' AND FILE_NAME LIKE '%_{streamType}_%'  AND HDFS_ROW_COUNT > 0 AND TO_CHAR(ETL_DATE, 'DD-MM-YY') = '{etl_date.strftime('%d-%m-%y')}' ) t"""
+        df = read_oracle(spark,query) 
+        
+        # Filter by ETL_DATE
+        df_filtered = df.filter(col("ETL_DATE") == etl_date)
+        # Count total and completed
+        total = df_filtered.count()
+        # completed = df_filtered.filter(col("DATA_LAKE_COUNT").isNotNull()).count()
+        completed =df_filtered.filter(col("DATA_LAKE_STATUS")=='YES').count()
 
-        # ======================================================
-        # SINGLE SPARK SESSION
-        # ======================================================
-        spark = (
-            SparkSession.builder
-            .appName("CNTR_AND_GL_BALANCE_DIFFERENCE")
-            .getOrCreate()
-        )
+        print(f"ETL Date {etl_date}: {completed}/{total} files completed")
 
-        jdbc_url = get_jdbc_url()
-
-        oracle_properties = get_oracle_properties()
-
-        oracle_tables = tables_to_read("glif")
-
-        BALANCE = oracle_tables["BALANCE"]
-
-        # ======================================================
-        # COMMON DATE
-        # ======================================================
-        today = get_etl_date(spark)
-
-        run_date = today.strftime("%d-%m-%Y")
-
-        yesterday = (
-            today - timedelta(days=1)
-        ).strftime("%d-%m-%Y")
-
-        print(f"RUN DATE      : {run_date}")
-
-        print(f"YESTERDAY DATE: {yesterday}")
-
-        PROCESS_ID = getattr(
-            constants,
-            "DIFFERENCE_PIPELINE_ID",
-            3
-        )
-
-        process_run_id = (
-            sys.argv[1]
-            if len(sys.argv) > 1
-            else get_process_run_id(
+        if total > 0 and completed == total :
+            print("All files processed. Stopping Spark...")
+            cfg = paths_for_read(typeToRead, etl_date, etl_date.strftime("%Y-%m-%d"))
+            manifest_base = cfg["MANIFEST_BASE_PATH"]
+            manifest_file = f"{typeToRead.upper()}_alldata_successfull_{run_id}_Manifest.txt"
+            required_date = etl_date.strftime("%Y-%m-%d")
+            create_manifest(
                 spark,
-                PROCESS_ID,
-                run_date
+                manifest_file,
+                manifest_base,
+                etl_date,
+                f"{typeToRead.upper()} | WHOLE DATA SUCCESSFULY LOADED | DATE={required_date}"
             )
-        )
+            if(count_holder[0]>1):
+                log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started_{streamType}",2,f"{typeToRead} pipeline completed successfully")
+            else:
+                log_etl(spark, process_run_id, f"{typeToRead}_error_files_{streamType}",2,f"All files successfully processed.")
+                log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started_{streamType}",2,f"{typeToRead} pipeline completed successfully")
+            global query_global
+            query_global.stop()    
+        else:
+            print("Waiting for more files...")
+    except Exception as e:
+        print(f"Error in check_and_stop_spark: {e}")
 
-        print(f"Process RunId : {process_run_id}")
 
-        # ======================================================
-        # ======================================================
-        # PART 1 : CNTR SUMMARY
-        # ======================================================
-        # ======================================================
+def process_ready_files(batch_df, batch_id,metadata_df):
+    global typeToRead ,run_id ,process_run_id, failedFiles ,count_holder ,streamType,today
+    # print(f"Batch {batch_id} received with {batch_df.count()} rows")  # Debug: always print if batch arrives
+    # all_files = batch_df.filter(col("final_status") == "READY").select("file_name", "final_status").collect()
+    # print(f"All files: {[(r['file_name'], r['final_status']) for r in all_files]}")
+    ready_files = batch_df.select("file_name").collect()
+    spark = batch_df.sparkSession
+    if len(ready_files) == 0:
+        print("No READY files in this batch.")
+        return
+    producer = Producer({"bootstrap.servers": get_kafka_ip()})
+    for row in ready_files:
+        filenametemp = row["file_name"]
+        file_code = file_code = re.sub(r'_\d{8}_', '_', filenametemp)
         try:
-
-            print("====================================")
-            print("STARTING CNTR SUMMARY")
-            print("====================================")
-
-            log_etl(
-                spark,
-                process_run_id,
-                "cntr_summary_started",
-                1,
-                "Generating CNTR Summary"
+            value = process_single_file_dynamic(spark, f"{row['file_name']}.gz",streamType,metadata_df)
+            message = {
+                "file_name": row["file_name"],
+                "value": value,
+                "etl_date":today.strftime("%d-%m-%Y")
+            }
+            
+            # Send the message to Kafka
+            producer.produce(
+                topic="allfiletodatalake", 
+                value=json.dumps(message)  # Serialize the dict to a JSON string
             )
-
-            query = f"""
-            (
-                SELECT
-                    CGL,
-                    CURRENCY,
-                    COUNT(1) AS COUNT
-                FROM {BALANCE}
-                WHERE CGL IN (
-                    '1260505001',
-                    '1260505003',
-                    '1111111111'
-                )
-                AND BALANCE_DATE = TO_DATE(
-                    '{run_date}',
-                    'DD-MM-YYYY'
-                )
-                AND BALANCE <> 0
-                GROUP BY CGL, CURRENCY
-            ) T
-            """
-
-            result_df = read_oracle(
-                spark,
-                query
-            )
-
-            summary_df = result_df.select(
-
-                collect_list(
-
-                    struct(
-                        "cgl",
-                        "currency",
-                        "count"
-                    )
-
-                ).alias("summary")
-            )
-
-            final_df = summary_df.select(
-
-                lit("CNTR Summary").alias(
-                    "Summary Name"
-                ),
-
-                lit(run_date).alias("date"),
-
-                col("summary")
-            )
-
-            final_json = final_df.selectExpr(
-                "to_json(struct(*)) AS value"
-            ).first()["value"]
-
-            print(final_json)
-
-            log_etl(
-                spark,
-                process_run_id,
-                "cntr_summary_calculated",
-                2,
-                "CNTR Summary Successfully Calculated",
-                0,
-                final_json
-            )
-
-            log_etl(
-                spark,
-                process_run_id,
-                "cntr_summary_completed",
-                2,
-                "CNTR Summary generation completed"
-            )
-
-            print("====================================")
-            print("CNTR SUMMARY COMPLETED")
-            print("====================================")
-
         except Exception as e:
+            logger.info(f"Error in ETL Pipeline  {e}")
+            failedFiles.append(f"{file_code}")
+            log_etl(spark, process_run_id, f"{typeToRead}_error_files_{streamType}",3,f"Error in {typeToRead} files to read : {failedFiles}")
+            with lock:
+                count_holder[0] += 1
+    producer.flush()
+    #check_and_stop_spark(spark,typeToRead,run_id, failedFiles, count_holder, get_etl_date(spark),streamType)
+def main(args,typeToRead,HDFS_BASE,spark,today,spark_date,PROCESS_ID,run_id,logger,count_holder,failedFiles,process_run_id,streamType,isDelete,metadata_df):
+    
+    try:
+        startTime= datetime.now()
+        global query_global
+        #============================ CONFIG & DATE ============================
+        oracle_properties=get_oracle_properties()
+        yesterday = today - timedelta(days=1)
+        
+        posting_date_str = today.strftime("%Y-%m-%d")
+        today_str = today.strftime("%Y%m%d")
+        
+        yesterday=yesterday.strftime("%Y-%m-%d")
+ 
+        print(f"=== Using current date for POST_DATE: {posting_date_str} ===")
 
-            print("ERROR IN CNTR SUMMARY")
+        JDBC_URL = oracle_properties["url"]
+        ORACLE_USER = oracle_properties["user"]
+        ORACLE_PASSWORD = oracle_properties["password"]
+        ORACLE_DRIVER = oracle_properties["driver"]
+               
+        RECON_DATE = today.strftime("%Y-%m-%d")
+        etl_date_str = today.strftime("%Y-%m-%d")
+             
+        HDFS_PATH=""
+        checkpt=""
+        PROCESS_ID = 0
+        
+        if(typeToRead=="GLIF"):
 
-            traceback.print_exc()
+            hdfs_paths = paths_for_read("gliftotalfiles", today, today_str)
+            HDFS_PATH = f"{hdfs_paths['HDFS_PATH']}/{streamType}"
+            checkpt = f"{hdfs_paths['checkpt']}/{run_id}/{streamType}"
+        else: 
+            hdfs_paths = paths_for_read("cbstotalfiles", today, today_str)
+            HDFS_PATH = f"{hdfs_paths['HDFS_PATH']}/{streamType}"
+            checkpt = f"{hdfs_paths['checkpt']}/{run_id}/{streamType}"
+        log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started_{streamType}",1,f"{typeToRead} pipeline started.")
+        log_etl(spark, process_run_id, f"{typeToRead}_error_files_{streamType}",1,f"{typeToRead} pipeline error files.")
+        # if((run_id>1) and (isDelete == '1')):
+        #     try:
+        #         log_etl(spark, process_run_id, f"bulk_datalake_deletion_{streamType}", 1, "bulk_datalake deletion started")
+                
+        #         # 1. Register the Hadoop classes in your Python environment
+        #         java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
+        #         java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+                
+        #         # 2. Initialize the FileSystem object
+        #         conf = spark._jsc.hadoopConfiguration()
+        #         fs = spark._jvm.FileSystem.get(conf)
+                
+        #         # 3. Define the path to delete
+        #         base_delta_path = get_delta_path_by_file_type("reruncbs", etl_date_str)
+        #         delete_path = spark._jvm.Path(base_delta_path)
+                
+        #         # 4. Check existence and delete (True for recursive)
+        #         if fs.exists(delete_path):
+        #             fs.delete(delete_path, True)
+        #             log_etl(spark, process_run_id, f"bulk_datalake_deletion_{streamType}", 2, "Bulk datalake deletion success")
+                
 
-            log_etl(
-                spark,
-                process_run_id,
-                "cntr_summary_failed",
-                3,
-                f"Error while generating CNTR Summary : {str(e)}"
-            )
-
-        # ======================================================
-        # ======================================================
-        # PART 2 : GL_BALANCE_DIFFERENCE
-        # ======================================================
-        # ======================================================
-        try:
-
-            print("====================================")
-            print("STARTING GL_BALANCE_DIFFERENCE")
-            print("====================================")
-
-            log_etl(
-                spark,
-                process_run_id,
-                "gl_balance_difference_started",
-                1,
-                "GL balance difference started"
-            )
-
-            # ======================================================
-            # TODAY DATA
-            # ======================================================
-            today_df = read_oracle(
-                spark,
-                f"""
-                (
-                    SELECT
-                        BRANCH_CODE,
-                        CURRENCY,
-                        CGL,
-                        BALANCE AS T_BAL,
-                        INR_BALANCE AS T_INR_BAL
-                    FROM GL_BALANCE
-                    WHERE CGL IN (
-                        '1111111111',
-                        '1111111112',
-                        '1260505001',
-                        '2148505001',
-                        '1148505004',
-                        '1148505005',
-                        '1148505006',
-                        '1148505007',
-                        '1148505010',
-                        '1148505012',
-                        '1148505014',
-                        '1148505020',
-                        '2148505004',
-                        '2148505006',
-                        '2148505007',
-                        '2148505010',
-                        '2148505011',
-                        '2148505014',
-                        '2148505016',
-                        '2148505018',
-                        '2148505019',
-                        '2148505021',
-                        '2148505022',
-                        '2148505024',
-                        '2148505033',
-                        '2148505035',
-                        '1260505002',
-                        '1260505003'
-                    )
-                    AND BALANCE_DATE = TO_DATE(
-                        '{run_date}',
-                        'DD-MM-YYYY'
-                    )
-                ) T
-                """
-            )
-
-            # ======================================================
-            # YESTERDAY DATA
-            # ======================================================
-            yest_df = read_oracle(
-                spark,
-                f"""
-                (
-                    SELECT
-                        BRANCH_CODE,
-                        CURRENCY,
-                        CGL,
-                        BALANCE AS Y_BAL,
-                        INR_BALANCE AS Y_INR_BAL
-                    FROM GL_BALANCE
-                    WHERE CGL IN (
-                        '1111111111',
-                        '1111111112',
-                        '1260505001',
-                        '2148505001',
-                        '1148505004',
-                        '1148505005',
-                        '1148505006',
-                        '1148505007',
-                        '1148505010',
-                        '1148505012',
-                        '1148505014',
-                        '1148505020',
-                        '2148505004',
-                        '2148505006',
-                        '2148505007',
-                        '2148505010',
-                        '2148505011',
-                        '2148505014',
-                        '2148505016',
-                        '2148505018',
-                        '2148505019',
-                        '2148505021',
-                        '2148505022',
-                        '2148505024',
-                        '2148505033',
-                        '2148505035',
-                        '1260505002',
-                        '1260505003'
-                    )
-                    AND BALANCE_DATE = TO_DATE(
-                        '{yesterday}',
-                        'DD-MM-YYYY'
-                    )
-                ) Y
-                """
-            )
-
-            # ======================================================
-            # EXISTING DF
-            # ======================================================
-            existing_df = read_oracle(
-                spark,
-                """
-                (
-                    SELECT
-                        BRANCH_CODE,
-                        CURRENCY,
-                        CGL,
-                        FIRST_ERROR_DATE
-                    FROM
-                    (
-                        SELECT
-                            BRANCH_CODE,
-                            CURRENCY,
-                            CGL,
-                            FIRST_ERROR_DATE,
-                            ROW_NUMBER() OVER
-                            (
-                                PARTITION BY
-                                    BRANCH_CODE,
-                                    CURRENCY,
-                                    CGL
-                                ORDER BY BALANCE_DATE DESC
-                            ) rn
-                        FROM GL_BALANCE_DIFFERENCE
-                    )
-                    WHERE rn = 1
-                ) E
-                """
-            )
-
-            # ======================================================
-            # JOIN
-            # ======================================================
-            joined_df = today_df.alias("t").join(
-                yest_df.alias("y"),
-                on=[
-                    "BRANCH_CODE",
-                    "CURRENCY",
-                    "CGL"
-                ],
-                how="full_outer"
-            )
-
-            # ======================================================
-            # TYPE LOGIC
-            # ======================================================
-            result_df = joined_df.withColumn(
-
-                "TYPE",
-
-                when(
-                    (
-                        coalesce(col("Y_BAL"), lit(0)) == 0
-                    ) &
-                    (
-                        coalesce(col("T_BAL"), lit(0)) != 0
-                    ),
-
-                    lit("NEW_ENTRY")
-                )
-
-                .when(
-                    (
-                        coalesce(col("Y_BAL"), lit(0)) != 0
-                    ) &
-                    (
-                        coalesce(col("T_BAL"), lit(0)) != 0
-                    ) &
-                    (
-                        (
-                            col("Y_BAL")
-                            !=
-                            col("T_BAL")
-                        )
-                        |
-                        (
-                            col("Y_INR_BAL")
-                            !=
-                            col("T_INR_BAL")
-                        )
-                    ),
-
-                    lit("DIFFERENCE")
-                )
-
-                .when(
-                    (
-                        coalesce(col("Y_BAL"), lit(0)) != 0
-                    ) &
-                    (
-                        coalesce(col("T_BAL"), lit(0)) == 0
-                    ),
-
-                    lit("CLOSED")
-                )
-
-                .when(
-                    (
-                        coalesce(col("Y_BAL"), lit(0)) != 0
-                    ) &
-                    (
-                        coalesce(col("T_BAL"), lit(0)) != 0
-                    ) &
-                    (
-                        col("Y_BAL")
-                        ==
-                        col("T_BAL")
-                    ),
-
-                    lit("ZERO_DIFFERENCE")
-                )
-
-                .otherwise(
-                    lit("IGNORE")
-                )
-            )
-
-            # ======================================================
-            # JOIN EXISTING FIRST ERROR DATE
-            # ======================================================
-            result_df = result_df.join(
-                existing_df,
-                on=[
-                    "BRANCH_CODE",
-                    "CURRENCY",
-                    "CGL"
-                ],
-                how="left"
-            )
-
-            # ======================================================
-            # FIRST ERROR DATE LOGIC
-            # ======================================================
-            result_df = result_df.withColumn(
-
-                "FINAL_FIRST_ERROR_DATE",
-
-                when(
-                    col("TYPE") == "NEW_ENTRY",
-                    lit(today)
-                )
-
-                .when(
-                    col("TYPE").isin(
-                        "DIFFERENCE",
-                        "ZERO_DIFFERENCE",
-                        "CLOSED"
-                    ),
-
-                    coalesce(
-                        col("FIRST_ERROR_DATE"),
-                        lit(today)
-                    )
-                )
-            )
-
-            # ======================================================
-            # REMOVE IGNORE
-            # ======================================================
-            result_df = result_df.filter(
-                col("TYPE") != "IGNORE"
-            )
-
-            # ======================================================
-            # FINAL DF
-            # ======================================================
-            final_df = result_df.select(
-
-                lit(today).alias(
-                    "BALANCE_DATE"
-                ),
-
-                col("BRANCH_CODE"),
-
-                col("CURRENCY"),
-
-                col("CGL"),
-
-                coalesce(
-                    col("T_BAL"),
-                    lit(0)
-                ).alias("BALANCE"),
-
-                coalesce(
-                    col("T_INR_BAL"),
-                    lit(0)
-                ).alias("INR_BALANCE"),
-
-                col("TYPE"),
-
-                col("FINAL_FIRST_ERROR_DATE").alias(
-                    "FIRST_ERROR_DATE"
-                )
-            )
-
-            # ======================================================
-            # WRITE TO ORACLE
-            # ======================================================
-            final_df.write.jdbc(
-                url=jdbc_url,
-                table="GL_BALANCE_DIFFERENCE",
-                mode="append",
-                properties=oracle_properties
-            )
-
-            log_etl(
-                spark,
-                process_run_id,
-                "gl_balance_difference_completed",
-                2,
-                "GL balance difference completed successfully"
-            )
-
-            print("====================================")
-            print("GL_BALANCE_DIFFERENCE COMPLETED")
-            print("====================================")
-
-        except Exception as e:
-
-            print("ERROR IN GL_BALANCE_DIFFERENCE")
-
-            traceback.print_exc()
-
-            log_etl(
-                spark,
-                process_run_id,
-                "gl_balance_difference_failed",
-                3,
-                f"Error in GL balance difference : {str(e)}"
-            )
-
-        # ======================================================
-        # STOP SPARK ONLY ONCE
-        # ======================================================
-        spark.stop()
-
-        print("FULL JOB COMPLETED")
-
-    except Exception:
-
-        traceback.print_exc()
-
-        try:
+        #     except Exception as e:
+        #         log_etl(spark, process_run_id, f"bulk_datalake_deletion_{streamType}", 3, "Bulk datalake deletion failed")
+        #         spark.stop()
+        #         sys.exit(1)
+        log_etl(spark, process_run_id, f"source_dir_check_{streamType}", 1, f"checking if source dir : {HDFS_PATH} exists")
+        if not create_hdfs_dir(spark, HDFS_PATH, logger=logger):
+            log_etl(spark, process_run_id, f"source_dir_check_{streamType}", 3, f"Could not create or find path: {HDFS_PATH}")
             spark.stop()
-        except:
-            pass
+            sys.exit(1)
+        log_etl(spark, process_run_id, f"source_dir_check_{streamType}", 2, f"Source dir : {HDFS_PATH} exists")
+        binary_schema = StructType([
+            StructField("path", StringType(), True),
+            StructField("modificationTime", TimestampType(), True),
+            StructField("length", LongType(), True),
+            StructField("content", BinaryType(), True)
+        ])
+        # Read the stream with explicit schema
+        file_extension = "*.gz"
+        file_stream = spark.readStream \
+            .format("binaryFile") \
+            .schema(binary_schema) \
+            .option("pathGlobFilter", file_extension) \
+            .option("maxFilesPerTrigger", 100) \
+            .load(HDFS_PATH)
+        file_stream = file_stream.withColumn(
+            "full_file_name",
+            regexp_extract(col("path"), r"([^/]+)$", 1)
+        )
+        # Step 2: Now remove the .txt.gz extension
+        file_stream = file_stream.withColumn(
+            "file_name",
+            regexp_replace(col("full_file_name"), r"\.gz$", "")
+        )
 
-
-# ======================================================
-# DRIVER
-# ======================================================
+        # -------------------------------------------------
+        # 2. CONTROL FILE MASTER CHECK
+        # -------------------------------------------------
+        print("controll came here 1")
+        formatted_date = today.strftime('%Y-%m-%d')
+        # file_stream.show(20,False)
+        
+        Controll_query = f"""(SELECT FILE_NAME AS file_name, ETL_DATE FROM CONTROLL_FILE_MASTER WHERE TO_CHAR(ETL_DATE, 'DD-MM-YY') = '{today.strftime('%d-%m-%y')}'  AND HDFS_ROW_COUNT > 0) a"""
+        control_df = read_oracle(spark,Controll_query)
+        
+        df = file_stream.join(control_df, "file_name", "inner") \
+            .withColumn("control_status",
+                when(col("FILE_NAME").isNull(), "NOT_IN_CONTROL").otherwise("OK")
+            )
+   
+ 
+        print("controll came here 2")
+        
+        print("controll came here 4")
+        df = df.withColumn("final_status",
+                when(col("control_status") != "OK", col("control_status"))
+            #  .when(col("FILE_STATUS") != "OK", col("FILE_STATUS"))
+            #  .when(col("stream_status") != "OK", col("stream_status"))
+                .otherwise("READY")
+        )
+        monitor_thread = threading.Thread(
+            target=monitor_db_and_stop,
+            args=(spark, typeToRead, run_id, count_holder,today,streamType),
+            daemon=True
+        )
+        monitor_thread.start()
+        query_global = df.writeStream \
+            .outputMode("append") \
+            .foreachBatch(lambda batch_df, batch_id: process_ready_files(batch_df, batch_id, metadata_df)) \
+            .option("checkpointLocation",checkpt) \
+            .start()
+        query_global.awaitTermination()   
+        logger.info(f"Stream stopped successfully")
+        spark.stop()
+        logger.info(f"Final aggregation completed successfully")
+        sys.exit(0)
+    except Exception as e:
+        logger.info(f"Error in ETL Pipeline  {e}")
+        log_etl(spark, process_run_id, f"{typeToRead}_error_files_{streamType}",3,f"Error in  files to read ")
+        log_etl(spark, process_run_id, f"{typeToRead}_file_pipeline_started_{streamType}",3,f"Error in {typeToRead} pipeline.")
+        spark.stop()
+        sys.exit(1)
+    
 if __name__ == "__main__":
-
-    main(sys.argv)
+    typeToRead="CBS"
+    # streamType = sys.argv[2] 
+    # if len(sys.argv) < 3:
+    #     print("Missing required argument: streamType (sys.argv[2])")
+    #     sys.exit(1)
+    lock = Lock()
+    print(f"argumentcount {len(sys.argv)}")
+    streamType = sys.argv[2]
+    isDelete = sys.argv[3]
+    print(f"stream count {streamType}")
+    count_holder = [0]
+    HDFS_BASE = get_hdfs_base()
+    failedFiles = []
+    spark = create_spark_session("Controll File", HDFS_BASE)
+    today = get_etl_date(spark)
+    spark_date = today.strftime("%Y-%m-%d")
+    if(typeToRead=="GLIF"):
+        PROCESS_ID = Process.GLIF_ALL_DATA
+    else:
+        PROCESS_ID = Process.CBS_ALL_DATA
+    run_id = get_run_id(spark,today.strftime("%Y-%m-%d"),PROCESS_ID)
+    logger = setup_logger(typeToRead,spark_date,run_id)
+    process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today.strftime("%Y-%m-%d"))
+    metadata_query = f"""
+    (
+        SELECT
+            COLUMNNAME as columnname,
+            STARTVALUE,
+            ENDVALUE,
+            lower(DATA_TYPE) as data_type ,lower(FILE_TYPE) as FILE_TYPE
+        FROM TOTAL_DATA_PARAMETERS
+        WHERE  lower(TOBEINCLUDED) = 'yes'
+        ORDER BY STARTVALUE
+    ) temp
+    """
+ 
+    metadata_df = read_oracle(spark, metadata_query)
+    metadata_df.cache()
+    metadata_df.count()
+    # metadata = metadata_df.collect()
+    main(sys.argv,typeToRead,HDFS_BASE,spark,today,spark_date,PROCESS_ID,run_id,logger,count_holder,failedFiles,process_run_id,streamType,isDelete,metadata_df)
