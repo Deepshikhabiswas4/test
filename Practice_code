@@ -1,411 +1,284 @@
-from pyspark.sql import SparkSession, functions as F, types as T 
-from pyspark.sql.functions import col, lit, current_timestamp, upper, coalesce, when, substring, expr,concat,date_format, to_date,count ,to_json ,struct,input_file_name,element_at,split,regexp_extract,regexp_replace,concat_ws,last_day,dayofmonth,month
-from pyspark.sql.functions import collect_list, struct, to_json, sum , broadcast, lower
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, LongType, BinaryType
-import traceback
+# ==========================================================
+# BGL PIPELINE
+# ==========================================================
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import (
+    col,
+    split,
+    lit,
+    current_timestamp,
+    input_file_name,
+    substring,
+    concat,
+    regexp_replace,
+    when
+)
+
+from common.utils import (
+    create_spark_session,
+    get_hdfs_base,
+    get_etl_date,
+    setup_logger,
+    paths_for_read,
+    get_process_run_id,
+    get_run_id,
+    log_etl,
+    create_manifest
+)
+
 from common.constants import Process
-from confluent_kafka import Producer
-import sys
-import math
-from datetime import date, timedelta, datetime
-from pyspark.sql.functions import desc,broadcast
-import os
-from os.path import basename  
-import re
-from threading import Lock
-import time
-# =========== Common Methods =============================
-from common.log_etl_modified import log_etl
-from common.properties import get_oracle_properties
-from common.dateUtil import get_etl_date
-from common.fileUtil import files_to_read
-from common.fileUtil import paths_for_read
-from common.processRun import get_run_id
-from common.logger import setup_logger
-from common.fileUtil import get_hdfs_base
-from common.createSpark import create_spark_session
-from common.fileUtil import tables_to_read
-from common.read_write_oracle import write_oracle
-from common.read_write_oracle import read_oracle
-from common.processRun import get_process_run_id
-from py4j.java_gateway import java_import
-from common.utilites import create_hdfs_dir
-def controllFile(spark,run_id,startTime,HDFS_PATH,logger,etl_date,process_run_id):
-    try:
-        # log_etl(spark,"CONTROLL",run_id , "CONTROLL File Reading Started",8,1,startTime)
-        
-        df_raw = spark.read.text(HDFS_PATH).withColumn("log_file_path", input_file_name())
-        
-        # log_etl(spark,"CONTROLL",run_id,"ERROR IN READING  CONTROLL FILES: 200 : 74",8,3,startTime)
-            
-        # log_etl(spark,"CONTROLL",run_id , "CONTROLL File Reading Completed",9,2,startTime)
-        # log_etl(spark,"CONTROLL",run_id , "Analytics on CONTROLL data started",10,2,startTime)
-        df_raw = df_raw.filter(~col("value").rlike("^\\d+\\s+total$"))
-        try:
-            filemaster_query = f"""(select * from FILE_TYPE_MASTER ) a"""
-            df = read_oracle(spark,filemaster_query)
-            df_new = df.cache()
-            #df.show(20,truncate=false)
-            print(f"Loading Master Data... Count: {df.count()}")
-            log_etl(spark, process_run_id, "file_master_started",2,"File master reading completed.")
-            file_master_df = df_new
-        except Exception as e:
-            log_etl(spark, process_run_id, "file_master_started",3,"Error in File master reading.")
-            logger.info(f"Error in reading file master {e}")
-            spark.stop()
-            os._exit(1) 
 
-        df_raw = df_raw.withColumn(
-            "log_file_name",
-            element_at(split(col("log_file_path"), "/"), -1)
-        )
-        df_raw = df_raw.withColumn(
-            "region",
-            regexp_extract(col("log_file_name"), r"_([^_]+)_(\d{8})\.log$", 1)
-        ).withColumn(      
-            "run_date",
-            regexp_extract(col("log_file_name"), r"_([^_]+)_(\d{8})\.log$", 2)
-        )
-        # -----------------------------------
-        # 3. SPLIT ROW COUNT & FILE PATH
-        # -----------------------------------
-        df = df_raw.withColumn(
-            "row_count",
-            split(col("value"), r"\s+").getItem(0).cast("int")
-        ).withColumn(
-            "file_path",
-            split(col("value"), r"\s+").getItem(1)
-        ).drop("value")
 
-        # -----------------------------------
-        # 4. EXTRACT BASE FILE NAME
-        # -----------------------------------
-        df = df.withColumn(
-            "base_name",
-            element_at(split(col("file_path"), "/"), -1)
-        )
-        # -----------------------------------
-        # 5. CHECK IF FILE ENDS WITH NUMBER
-        # -----------------------------------
-        df = df.withColumn(
-            "suffix",
-            regexp_extract(col("base_name"), r"_(\d+)$", 1)
-        )
-        df = df.withColumn(
-            "prefix",
-            when(col("suffix") != "",
-                regexp_replace(col("base_name"), r"_(\d+)$", "")
-            ).otherwise(col("base_name"))
-        )
-        # -----------------------------------
-        # 6. BUILD UPDATED FILE NAME
-        # -----------------------------------
-        df_final = df.withColumn(
-            "updated_file_name",
-            when(
-                col("suffix") != "",
-                concat_ws("_", col("prefix"), col("run_date"), col("region"), col("suffix"))
-            ).otherwise(
-                concat_ws("_", col("prefix"), col("run_date"), col("region"))
-            )
-        ).withColumn(
-            "STREAM",
-            when(col("suffix") != "", "Y").otherwise("N")  # or just leave blank: ""
-        ).withColumn(
-            "FILE_PATTERN",
-            col("prefix")  # simply copy the prefix column
-        )
-          
-        result = df_final.join(
-        file_master_df.select("FILE_PATTERN", "STREAM", "FREQUENCY"),
-            on=["FILE_PATTERN", "STREAM"],
-            how="inner"
-        )
-        print(f"file master df count  {file_master_df.count()}")
-        file_master_df.show(20,False)
-        
-        # Date calculations
-        result = result.withColumn("date_obj", to_date(col("run_date"), "ddMMyyyy")) \
-                    .withColumn("is_month_end", col("date_obj") == last_day(col("date_obj"))) \
-                    .withColumn("is_year_end", (date_format(col("date_obj"), "MMdd") == "0331"))
-        
-        print(f"result 1 count  {result.count()}")
-        result.show(20,False)
-        # The Join already proved the file exists, now just check if the timing is right
-        freq_col = upper(coalesce(col("FREQUENCY"), lit("")))
-        result_df = result.withColumn(
-            "INCLUDE",
-            when(freq_col.contains("D"), "YES")
+# ==========================================================
+# SPARK SESSION
+# ==========================================================
 
-            .when(
-                freq_col.contains("M") &
-                (col("is_month_end") | col("is_year_end")),
-                "YES"
-            )
+HDFS_BASE = get_hdfs_base()
 
-            .when(
-                freq_col.contains("Y") &
-                col("is_year_end"),
-                "YES"
-            )
+spark = create_spark_session(
+    "BGL PIPELINE",
+    HDFS_BASE
+)
 
-            .otherwise("NO")
-        )
-        # result_df = result.withColumn(
-        #     "INCLUDE",
-        #     when(col("FREQUENCY") == "D/M/Y", "YES")
-        #     .when((col("FREQUENCY") == "M/Y") & (col("is_month_end") | col("is_year_end")), "YES")
-        #     .when((col("FREQUENCY") == "Y") & (col("is_year_end")), "YES")
-        #     .otherwise("NO")
-        # )
-        print(f"result 2 count  {result_df.count()}")
-        result_df.show(20,False)
-        controll_df = result_df.filter(col("INCLUDE") == "YES") \
-            .select("updated_file_name", "row_count") \
-            .withColumnRenamed("updated_file_name", "FILE_NAME") \
-            .withColumnRenamed("row_count", "HDFS_ROW_COUNT") \
-            .withColumn("FILE_TYPE", when(lower(col("FILE_NAME")).startswith("glif"), "GLIF").otherwise("CBS")) \
-            .withColumn("ETL_DATE", lit(etl_date)) 
-        return controll_df
-    except Exception as e:
-        logger.info(f"Error processing CONTROLL files {e}")
-        raise
-        # log_etl(spark,"CONTROLL",run_id ,"ERROR IN Analytics on CONTROLL data: 201 : 91",10,3,startTime)
-       
-        
+spark.sparkContext.setLogLevel("ERROR")
 
-def process_file_path(batch_df, batch_id):
-    # Extract unique file paths
-    try:
-        global count_holder , failedFiles , successFiles 
-        if not batch_df.isEmpty():
-            spark = batch_df.sparkSession  # Get session from DataFrame
-            for row in batch_df.select("path").distinct().collect():
-                full_path = row["path"]
-                controllfilebase(full_path, spark,count_holder,failedFiles,successFiles)
-    except Exception as e:
-        print("error in batch processing ",e)
 
-        
-def controllfilebase(full_path: str, spark,count_holder,failedFiles , successFiles):
-    today = get_etl_date(spark)
-    print(today)
-    PROCESS_ID= Process.CONTROL_PIPELINE
-    process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today.strftime("%Y-%m-%d"))
-    run_id = get_run_id(spark,today.strftime("%Y-%m-%d"),PROCESS_ID) 
-    # run_id = 1
-    logger = setup_logger("controll",today,run_id)
-    try:
-        startTime= datetime.now()
-        #============================ CONFIG & DATE ============================
-        oracle_properties=get_oracle_properties()
-        # print(oracle_properties)
-        
-        yesterday = today - timedelta(days=1)
-        spark_date = today.strftime("%Y-%m-%d")
-        
-        
-        logger.info(f"File detected {full_path}")
-        logger.info(f"runid :{run_id}  process_run_id:{process_run_id}")
-        file_name = basename(full_path)
-        
-
-        match = re.search(r'^(.)[^_]*_([^_]+)_', file_name)
-        
-        if match:
-            file_code = f"{match.group(1)}{match.group(2)}"
-        else:
-            file_code = "UNKNOWN"
-
-        posting_date_str = today.strftime("%Y-%m-%d")
-        today_str = today.strftime("%Y%m%d")
- 
-        yesterday=yesterday.strftime("%Y-%m-%d")
- 
-        print(f"=== Using current date for POST_DATE: {posting_date_str} ===")
- 
-        JDBC_URL = oracle_properties["url"]
-        ORACLE_USER = oracle_properties["user"]
-        ORACLE_PASSWORD = oracle_properties["password"]
-        ORACLE_DRIVER = oracle_properties["driver"]
-               
-        RECON_DATE = today.strftime("%Y-%m-%d")
- 
-             
-        hdfs_paths = paths_for_read("controll", today, today_str)
-        HDFS_PATH = hdfs_paths["HDFS_PATH"]
-        
-        TABLES = tables_to_read("controll")
-        CONTROLL = TABLES["CONTROLL_FILE_MASTER"]
-        try:
-            print("function called")
-            final_df = controllFile(spark,run_id,startTime,full_path,logger,today,process_run_id)
-            final_df.show(20,False)
-            print(f"function returned df count {final_df.count()}")
-            logger.info(f"Final dataframe fetched from  controll file")
-        except Exception as e:
-            logger.info(f"Error in controll file processing {e}")
-            failedFiles.append(f"{file_code}")
-            log_etl(spark,process_run_id , "control_file_error",3,f"Error in controll file processing: {failedFiles}")
-            return
-    
-        try:
-            print("function writeorcale started")
-            write_oracle(final_df,CONTROLL)
-            
-            successFiles.append(f"{file_code}")
-            
-            log_etl(spark,process_run_id , "control_file_saved_sucessfully",2,f"Controll file saved {successFiles}")
-            with lock:
-                count_holder[0] += 1
-            print(f"Batch  processed. Count = {count_holder[0]}")
-
-        except Exception as e:
-            print(e)
-            logger.info(f"Error in writing in db ", exc_info=True)
-            failedFiles.append(f"{file_code}")
-            log_etl(spark,process_run_id , "control_file_error",3,f"Error in saving controll file1: {failedFiles}")
-            
-
-    except Exception as e:
-            print(e)
-            logger.info(f"Error in ETL Pipeline ", exc_info=True)
-            # log_etl(spark,"CONTROLL",run_id ,"ERROR IN ETL PIPELINE: 204 : 202",10,3,startTime)
-            
-
-def main(args):
-    HDFS_BASE = get_hdfs_base()
-    spark = create_spark_session("Controll File", HDFS_BASE)
-    today = get_etl_date(spark)
-    today_str = today.strftime("%Y%m%d")
-    PROCESS_ID= Process.CONTROL_PIPELINE
-    hdfs_paths = paths_for_read("controll", today, today_str)
-    process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today.strftime("%Y-%m-%d"))
-    pipeline_run_id = get_run_id(spark,today.strftime("%Y-%m-%d"),PROCESS_ID) 
-    
-    try:
-        HDFS_BASE = get_hdfs_base()
-        today = get_etl_date(spark)
-        today_str = today.strftime("%Y%m%d")
-        hdfs_paths = paths_for_read("controll", today, today_str)
-        process_run_id = sys.argv[1] if len(sys.argv) > 1 else get_process_run_id(spark,PROCESS_ID,today.strftime("%Y-%m-%d"))
-        pipeline_run_id = get_run_id(spark,today.strftime("%Y-%m-%d"),PROCESS_ID) 
-        posting_date_str = today.strftime("%Y-%m-%d")
-        checkpointControl = f"{hdfs_paths['checkpt']}/{pipeline_run_id}"
-        if(pipeline_run_id>1):
-            try:
-                log_etl(spark, process_run_id, "controll_deletion_oracle", 1, "Controll file deletion started")
-                oracle_properties=get_oracle_properties()
-
-                oracle_url = oracle_properties["url"]
-                oracle_user = oracle_properties["user"]
-                oracle_password = oracle_properties["password"]
-                oracle_driver = oracle_properties["driver"]
-                conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(oracle_url,oracle_user,oracle_password)
-           
-                sql_query=f"""
-                Delete from CONTROLL_FILE_MASTER where ETL_DATE = to_date('{posting_date_str}','yyyy-mm-dd')
-                """
-                conn.setAutoCommit(False)             
-                statement = conn.createStatement()
-                print("stmt")
-                statement.execute(sql_query)
-                conn.commit()
-                
-                log_etl(spark, process_run_id, "controll_deletion_oracle", 2, "Controll file deletion success")
-            except Exception as e:
-                
-                log_etl(spark, process_run_id, "controll_deletion_oracle", 3, "Controll file deletion failed")
-                spark.stop()
-                sys.exit(1)
-            # try:
-            #     log_etl(spark, process_run_id, "checkptdeletion", 1, "Check point deletion started")
-                
-            #     # 1. Register the Hadoop classes in your Python environment
-            #     java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-            #     java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-                
-            #     # 2. Initialize the FileSystem object
-            #     conf = spark._jsc.hadoopConfiguration()
-            #     fs = spark._jvm.FileSystem.get(conf)
-                
-            #     # 3. Define the path to delete
-            #     delete_path = spark._jvm.Path(checkpointControl)
-                
-            #     # 4. Check existence and delete (True for recursive)
-            #     if fs.exists(delete_path):
-            #         fs.delete(delete_path, True)
-                  
-            #     log_etl(spark, process_run_id, "checkptdeletion", 2, "Check point deletion success")
-                
-
-            # except Exception as e:
-            #     logger.error(f"Error {e} while deleting from checkpoint folder")
-            #     log_etl(spark, process_run_id, "checkptdeletion", 3, "Check point deletion failed")
-            #     spark.stop()
-            #     sys.exit(1)
-
-        log_etl(spark, process_run_id, "control_file_pipeline_started",1)
-        HDFS_PATH = hdfs_paths["HDFS_PATH"]
-        logger = setup_logger("controll",today,pipeline_run_id)
-        log_etl(spark, process_run_id, "source_dir_check", 1, f"checking if source dir : {HDFS_PATH} exists")
-        if not create_hdfs_dir(spark, HDFS_PATH, logger=logger):
-            log_etl(spark, process_run_id, "source_dir_check", 3, f"Could not create or find path: {HDFS_PATH}")
-            spark.stop()
-            os._exit(1)
-        log_etl(spark, process_run_id, "source_dir_check", 2, f"Source dir : {HDFS_PATH} exists")
-        log_etl(spark, process_run_id, "file_master_started",1,"File master reading started.")
-        
-        log_etl(spark, process_run_id, "control_file_error",1,"Log for error files")
-        log_etl(spark, process_run_id, "control_file_saved_sucessfully",1,"Log for success files")
-        binary_schema = StructType([
-                    StructField("path", StringType(), True),
-                    StructField("modificationTime", TimestampType(), True),
-                    StructField("length", LongType(), True),
-                    StructField("content", BinaryType(), True)
-        ])
-        file_extension = "*.log" 
-        file_stream = spark.readStream \
-            .format("binaryFile") \
-            .schema(binary_schema) \
-            .option("pathGlobFilter", file_extension) \
-            .load(HDFS_PATH)
-        file_stream = file_stream.select("path")
-        query = file_stream.writeStream \
-        .foreachBatch(process_file_path) \
-        .option("checkpointLocation", checkpointControl) \
-        .start() \
-        # Wait for termination
-        
-        while query.isActive:
-            time.sleep(2)
-            with lock:
-                if count_holder[0] >= 2:
-                    print("Stopping Spark Streaming after 3 batches.")
-                    print("function writeorcale done")  
-                    log_etl(spark, process_run_id, "control_file_pipeline_started",2, f"controll file prosessing completed.")
-                    log_etl(spark,process_run_id , "control_file_error",2,f"All files processed successfuly")
-                    query.stop()
-                    query.awaitTermination()
-                    query.awaitTermination()
-                    spark.stop() 
-                    break
-            
-        
-    except Exception as e:
-        logger.info(f"Error in controll pipeline {e}")
-        log_etl(spark, process_run_id, "control_file_pipeline_started",3,"error in controll file parsing.")
-        for q in spark.streams.active:
-            q.stop()    
-        spark.stop()
-        os._exit(1)
-
-    #spark.stop()
+# ==========================================================
+# MAIN
+# ==========================================================
 
 if __name__ == "__main__":
-    count_holder = [0]
-    successFiles = []
-    failedFiles = []
-    lock = Lock()
-    main(sys.argv)
-    
+
+    PROCESS_ID = Process.MISC_DATA
+
+    today = get_etl_date(spark)
+    today_str = today.strftime("%Y%m%d")
+
+    process_run_id = None
+    run_id = None
+    logger = None
+
+    try:
+
+        # ==========================================================
+        # PROCESS IDS
+        # ==========================================================
+
+        process_run_id = get_process_run_id(
+            spark,
+            PROCESS_ID
+        )
+
+        run_id = get_run_id(
+            spark,
+            PROCESS_ID
+        )
+
+        # ==========================================================
+        # LOGGER
+        # ==========================================================
+
+        logger = setup_logger(
+            process_name="BGL_PIPELINE",
+            process_run_id=process_run_id
+        )
+
+        logger.info("========== BGL PIPELINE STARTED ==========")
+
+        # ==========================================================
+        # PATH CONFIGS
+        # ==========================================================
+
+        hdfs_paths = paths_for_read(
+            "bgl",
+            today,
+            today_str
+        )
+
+        HDFS_PATH = hdfs_paths["HDFS_PATH"]
+        DELTA_PATH = hdfs_paths["DELTA_PATH"]
+        MANIFEST_BASE_PATH = hdfs_paths["MANIFEST_BASE_PATH"]
+
+        logger.info(f"HDFS PATH : {HDFS_PATH}")
+        logger.info(f"DELTA PATH : {DELTA_PATH}")
+
+        # ==========================================================
+        # READ FILE FROM HDFS
+        # ==========================================================
+
+        file_df = (
+            spark.read
+            .text(HDFS_PATH)
+            .withColumn(
+                "SOURCE_FILE_NAME",
+                input_file_name()
+            )
+        )
+
+        logger.info("File read successfully from HDFS")
+
+        # ==========================================================
+        # SPLIT PIPE-SEPARATED DATA
+        # ==========================================================
+
+        parts = split(col("value"), r"\|")
+
+        # ==========================================================
+        # PARSE DATA
+        # ==========================================================
+
+        parsed_df = file_df.select(
+
+            # ------------------------------------------------------
+            # SOURCE COLUMNS
+            # ------------------------------------------------------
+
+            parts.getItem(0).alias("BGL"),
+            parts.getItem(1).alias("BRANCH_CODE"),
+            parts.getItem(2).alias("PRODUCT"),
+            parts.getItem(3).alias("SEGMENT"),
+            parts.getItem(4).alias("AMOUNT"),
+            parts.getItem(5).alias("GLCC"),
+            parts.getItem(6).alias("ACCOUNT_NAME"),
+
+            # ------------------------------------------------------
+            # STATUS
+            # REMOVE LEADING ZEROES
+            # ------------------------------------------------------
+
+            when(
+                regexp_replace(
+                    parts.getItem(7),
+                    "^0+",
+                    ""
+                ) == "",
+                "0"
+            ).otherwise(
+                regexp_replace(
+                    parts.getItem(7),
+                    "^0+",
+                    ""
+                )
+            ).alias("STATUS"),
+
+            # ------------------------------------------------------
+            # ACCOUNT NUMBER LOGIC
+            # OMIT FIRST 7 CHARACTERS
+            # TAKE NEXT 7 CHARACTERS
+            # APPEND BRANCH CODE
+            # ------------------------------------------------------
+
+            concat(
+                substring(parts.getItem(5), 8, 7),
+                parts.getItem(1)
+            ).alias("ACCOUNT_NO"),
+
+            # ------------------------------------------------------
+            # AUDIT COLUMNS
+            # ------------------------------------------------------
+
+            lit(today.strftime("%Y-%m-%d")).alias("ETL_DATE"),
+
+            current_timestamp().alias("LOAD_TIMESTAMP"),
+
+            lit(process_run_id).alias("PROCESS_RUN_ID"),
+
+            lit(run_id).alias("RUN_ID"),
+
+            col("SOURCE_FILE_NAME")
+
+        )
+
+        # ==========================================================
+        # ROW COUNT
+        # ==========================================================
+
+        row_count = parsed_df.count()
+
+        logger.info(f"TOTAL ROW COUNT : {row_count}")
+
+        # ==========================================================
+        # ADD HDFS ROW COUNT
+        # ==========================================================
+
+        parsed_df = parsed_df.withColumn(
+            "HDFS_ROW_COUNT",
+            lit(row_count)
+        )
+
+        # ==========================================================
+        # WRITE TO DATA LAKE
+        # ==========================================================
+
+        (
+            parsed_df.write
+            .format("delta")
+            .mode("append")
+            .save(DELTA_PATH)
+        )
+
+        logger.info("Data successfully written to Delta/Data Lake")
+
+        # ==========================================================
+        # CREATE MANIFEST FILE
+        # ==========================================================
+
+        create_manifest(
+            spark=spark,
+            manifest_base_path=MANIFEST_BASE_PATH,
+            file_name="BGL_MANIFEST",
+            process_date=today_str,
+            row_count=row_count,
+            process_run_id=process_run_id,
+            run_id=run_id
+        )
+
+        logger.info("Manifest file created successfully")
+
+        # ==========================================================
+        # LOG SUCCESS
+        # ==========================================================
+
+        log_etl(
+            spark=spark,
+            process_id=PROCESS_ID,
+            process_run_id=process_run_id,
+            run_id=run_id,
+            status=2,
+            row_count=row_count,
+            remarks="BGL PIPELINE SUCCESS"
+        )
+
+        logger.info("========== BGL PIPELINE COMPLETED ==========")
+
+    # ==========================================================
+    # EXCEPTION HANDLING
+    # ==========================================================
+
+    except Exception as e:
+
+        error_message = str(e)
+
+        if logger:
+            logger.error(f"PIPELINE FAILED : {error_message}")
+
+        log_etl(
+            spark=spark,
+            process_id=PROCESS_ID,
+            process_run_id=process_run_id,
+            run_id=run_id,
+            status=3,
+            row_count=0,
+            remarks=error_message
+        )
+
+        raise e
+
+    # ==========================================================
+    # FINALLY
+    # ==========================================================
+
+    finally:
+
+        spark.stop()
