@@ -1,395 +1,200 @@
-# ==========================================================
-# BGL PIPELINE
-# ==========================================================
-
+import datetime 
+from pyspark.sql import SparkSession , functions as F
+import pyspark.sql.types as T
+from pyspark.sql.functions import to_date,expr, round, col,when, length, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce
+from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType
+from datetime import date, timedelta
+from pyspark.sql.functions import desc
 import sys
-from datetime import date
 from py4j.java_gateway import java_import
-
-from pyspark.sql.functions import (
-    col,
-    split,
-    substring,
-    concat,
-    regexp_replace,
-    when
-)
-
+import concurrent.futures
+import builtins
+from pyspark.sql import Row
+import re
+from pyspark.sql.functions import col, date_format, to_date
+from pyspark.sql.functions import current_date, last_day, date_sub
+# =========== Common Methods =============================
+from common.logger import setup_logger 
+from common.properties import get_oracle_properties
 from common.dateUtil import get_etl_date
+from common.fileUtil import files_to_read
 from common.fileUtil import paths_for_read
-from common.processRun import get_process_run_id
+from common.fileUtil import tables_to_read
 from common.processRun import get_run_id
-from common.log_etl_modified import log_etl
-from common.constants import Process
-from common.logger import setup_logger
-from common.fileUtil import get_hdfs_base
+from common.pattern import read_patterns
 from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base
+from common.check_monthend import check_Previous_MonthEnd
+from common.read_write_oracle import read_oracle
+from common.read_write_oracle import write_oracle
+from common.datalake_paths import get_delta_path_by_file_type   #
+# ========================================================
+HDFS_BASE = get_hdfs_base()
+spark = create_spark_session("GLIF_PROVISION_PIPELINE", HDFS_BASE)
 
 
-# ==========================================================
-# MANIFEST CREATION
-# ==========================================================
 
-def create_manifest(
-        spark,
-        BASE_MANIFEST_PATH,
-        RUN_ID,
-        process_run_id,
-        logger
-):
+# ||||||||| ORACLE TABLES |||||||||||||||
+oracle_tables = tables_to_read("glif")
 
-    try:
-
-        etl_date_path = get_etl_date(spark).strftime("%Y%m%d")
-
-        hdfs_dir = f"{BASE_MANIFEST_PATH}/{etl_date_path}"
-
-        java_import(
-            spark._jvm,
-            "org.apache.hadoop.fs.FileSystem"
-        )
-
-        java_import(
-            spark._jvm,
-            "org.apache.hadoop.fs.Path"
-        )
-
-        fs = spark._jvm.FileSystem.get(
-            spark._jsc.hadoopConfiguration()
-        )
-
-        manifest_filename = (
-            f"BGL_successful_{RUN_ID}_Manifest.txt"
-        )
-
-        dest_file_path = spark._jvm.Path(
-            f"{hdfs_dir}/{manifest_filename}"
-        )
-
-        log_etl(
-            spark,
-            process_run_id,
-            "bgl_manifest_writing",
-            1,
-            "Starting manifest stage."
-        )
-
-        hdfs_dir_obj = spark._jvm.Path(hdfs_dir)
-
-        if not fs.exists(hdfs_dir_obj):
-            fs.mkdirs(hdfs_dir_obj)
-
-        out_stream = fs.create(
-            dest_file_path,
-            True
-        )
-
-        out_stream.write(
-            bytearray(
-                "BGL successfully loaded",
-                "utf-8"
-            )
-        )
-
-        out_stream.close()
-
-        logger.info(
-            f"Manifest written to HDFS : {dest_file_path}"
-        )
-
-        log_etl(
-            spark,
-            process_run_id,
-            "bgl_manifest_writing",
-            2,
-            "Manifest uploaded successfully."
-        )
-
-    except Exception as e:
-
-        logger.error(
-            f"Error in manifest creation : {e}"
-        )
-
-        log_etl(
-            spark,
-            process_run_id,
-            "bgl_manifest_writing",
-            3,
-            "Error in creating manifest file"
-        )
-
-        raise
+TRANSACTIONS = oracle_tables["TRANSACTIONS"]
+BALANCE = oracle_tables["BALANCE"]
+INVALID = oracle_tables["INVALID"]
+CGLS = oracle_tables["CGLS"]
+CURRENCY = oracle_tables["CURRENCY"]
+BRANCH = oracle_tables["BRANCH"]
+# ||||||||| ORACLE TABLES |||||||||||||||
 
 
-# ==========================================================
-# MAIN
-# ==========================================================
+def process_provision_data(RUN_ID,BATCH_ID_LITERAL=None):
 
-if __name__ == "__main__":
+    # ===================== DATES =====================
+    etl_date = get_etl_date(spark)
+    etl_str = etl_date.strftime("%Y-%m-%d")
 
-    # ------------------------------------------------------
-    # PROCESS DETAILS
-    # ------------------------------------------------------
+    # RUN_ID = get_run_id(spark, etl_str, "GLIF")
+    logger = setup_logger("GLIF", RUN_ID, etl_str)
 
-    PROCESS_ID = Process.MISC_DATA
+    logger.info(f"ETL_DATE : {etl_date}")
 
-    HDFS_BASE = get_hdfs_base()
+    # =========================================================
+    # READING GLIF RAW DELTA (DATALAKE)
+    # =========================================================
+    GLIF_DELTA_PATH = get_delta_path_by_file_type("glif", etl_str)
 
-    spark = create_spark_session(
-        "BGL_PIPELINE",
-        HDFS_BASE
+    df_raw = spark.read.format("delta").load(GLIF_DELTA_PATH)
+
+    # =========================================================
+    # ONLY PROVISION FILES (GLIFPRI & GLIFPRB)
+    # =========================================================
+    df_raw = df_raw.filter(
+        (F.lower(F.col("file_name")).startswith("glifpri")) |
+        (F.lower(F.col("file_name")).startswith("glifprb"))
     )
 
-    spark.sparkContext.setLogLevel("ERROR")
+    logger.info("Filtered only provision files")
 
-    process_run_id = None
-    run_id = None
-    logger = None
+    # =========================================================
+    # CREATING ID USING PARSED COLUMNS (NO SUBSTRING ANYMORE)
+    # =========================================================
+    df_processed = df_raw.withColumns({
+        "Id": F.concat(F.col("BRANCH_CODE"), F.col("CURRENCY"), F.col("CGL")),
+        "currency_code": F.col("CURRENCY")
+    })
 
-    try:
 
-        # --------------------------------------------------
-        # DATES
-        # --------------------------------------------------
+    df_clean = df_processed.withColumns({
+        "Amount_raw": F.when(
+            F.col("currency_code") != "INR",
+            F.col("FOREIGN_AMOUNT")
+        ).otherwise(F.col("AMOUNT"))
+    })
 
-        today = get_etl_date(spark)
 
-        posting_date_str = today.strftime("%Y-%m-%d")
+    df_clean = df_clean.withColumns({
+        "Amount_base": substring(col("Amount_raw"), 1, 16),
+        "sign_char": substring(col("Amount_raw"), 17, 1)
+    })
 
-        process_run_id = (
-            sys.argv[1]
-            if len(sys.argv) > 1
-            else get_process_run_id(
-                spark,
-                PROCESS_ID,
-                posting_date_str
-            )
-        )
+    digit_map = create_map(
+        lit('1'), lit('1'), lit('2'), lit('2'), lit('3'), lit('3'),
+        lit('4'), lit('4'), lit('5'), lit('5'), lit('6'), lit('6'),
+        lit('7'), lit('7'), lit('8'), lit('8'), lit('9'), lit('9'),
+        lit('0'), lit('0'),
+        lit('p'), lit('0'), lit('q'), lit('1'), lit('r'), lit('2'),
+        lit('s'), lit('3'), lit('t'), lit('4'), lit('u'), lit('5'),
+        lit('v'), lit('6'), lit('w'), lit('7'), lit('x'), lit('8'),
+        lit('y'), lit('9')
+    )
 
-        run_id = get_run_id(
-            spark,
-            posting_date_str,
-            PROCESS_ID
-        )
+    df_with_signed_amount = df_clean.withColumns({
+        "last_digit": digit_map.getItem(col("sign_char")),
+        "sign": when(
+            col("sign_char").isin(['p','q','r','s','t','u','v','w','x','y']),
+            -1
+        ).otherwise(1)
+    })
 
-        logger = setup_logger(
-            "BGL",
-            run_id,
-            posting_date_str
-        )
+    df_with_signed_amount = df_with_signed_amount.withColumn(
+        "Amount_decimal_str",
+        concat(col("Amount_base"), col("last_digit"))
+    )
 
-        logger.info(
-            "========== BGL PIPELINE STARTED =========="
-        )
+    df_final = df_with_signed_amount.withColumns({
+        "Amount_final": (col("Amount_decimal_str").cast(DecimalType(25,4)) / 1000) * col("sign")
+    })
 
-        # --------------------------------------------------
-        # PATH CONFIG
-        # --------------------------------------------------
+    # =========================================================
+    # DEBIT / CREDIT SPLIT
+    # =========================================================
+    df_with_signed_amount = df_final.withColumns({
+        "Amountpve": when(col("Amount_final") > 0, col("Amount_final")).otherwise(0),
+        "Amountnve": when(col("Amount_final") < 0, col("Amount_final")).otherwise(0)
+    })
 
-        hdfs_paths = paths_for_read(
-            "bgl",
-            today,
-            posting_date_str
-        )
+    df_agg = df_with_signed_amount.groupBy("Id").agg(
+        F.sum(F.col("Amountpve")).alias("CREDIT_AMOUNT"),
+        F.sum(F.col("Amountnve")).alias("DEBIT_AMOUNT"),
+        F.count(F.col("Id")).alias("TRANSACTION_COUNT")
+    )
 
-        HDFS_PATH = hdfs_paths["HDFS_PATH"]
+    # =========================================================
+    # JOURNAL CREATION
+    # =========================================================
+    df_mapped = df_agg.withColumns({
+        "BATCH_ID": lit(BATCH_ID_LITERAL).cast(StringType()),
+        "JOURNAL_ID": lit(None).cast(StringType()),
+        "BRANCH_CODE": substring(col("Id"), 1, 5),
+        "CURRENCY": substring(col("Id"), 6, 3),
+        "CGL": substring(col("Id"), 9, 10),
+        "NARRATION": concat(lit("Provision for - "), date_format(to_date(lit(etl_str)), "MMMyyyy")),
+        "SOURCE_FLAG": lit("V").cast(StringType())
+    })
 
-        # TODO:
-        # Replace with actual key from your config
+    provision_df = df_mapped.select(
+        "BATCH_ID",
+        "JOURNAL_ID",
+        "BRANCH_CODE",
+        "CURRENCY",
+        "CGL",
+        "NARRATION",
+        "CREDIT_AMOUNT",
+        "DEBIT_AMOUNT",
+        "TRANSACTION_COUNT",
+        "SOURCE_FLAG"
+    )
 
-        DELTA_PATH = hdfs_paths["DELTA_PATH"]
+    logger.info("Provision dataframe created successfully")
 
-        MANIFEST_BASE_PATH = (
-            hdfs_paths["MANIFEST_BASE_PATH"]
-        )
+    return provision_df
 
-        logger.info(
-            f"HDFS_PATH : {HDFS_PATH}"
-        )
+# =========================================================
+def reverse_provision(TRANSACTIONS, BATCH_ID_LITERAL):
 
-        logger.info(
-            f"DELTA_PATH : {DELTA_PATH}"
-        )
+    prev_month_end = check_Previous_MonthEnd()
+    prev_month_end_str = prev_month_end.strftime("%Y-%m-%d")
 
-        # --------------------------------------------------
-        # START LOG
-        # --------------------------------------------------
+    sql_Query = f"""(
+        select * from {TRANSACTIONS}
+        where source_flag = 'V'
+        and TRANSACTION_DATE = TO_DATE('{prev_month_end_str}', 'yyyy-mm-dd')
+    ) t"""
 
-        log_etl(
-            spark,
-            process_run_id,
-            "bgl_pipeline",
-            1,
-            "BGL pipeline started"
-        )
+    last_month_provision_df = read_oracle(spark, sql_Query)
 
-        # --------------------------------------------------
-        # READ FILES
-        # --------------------------------------------------
+    final_df = last_month_provision_df.select(
+        col("JOURNAL_ID"),
+        col("BRANCH_CODE"),
+        col("CURRENCY"),
+        col("CGL"),
+        concat(
+            lit("Provision Reversal for - "),
+            date_format(to_date(lit(prev_month_end_str), "MMMyyyy"))
+        ).alias("NARRATION"),
+        (-col("DEBIT_AMOUNT")).alias("CREDIT_AMOUNT"),
+        (-col("CREDIT_AMOUNT")).alias("DEBIT_AMOUNT"),
+        col("TRANSACTION_COUNT"),
+        col("SOURCE_FLAG")
+    ).withColumn("BATCH_ID", F.lit(BATCH_ID_LITERAL))
 
-        # Assumes HDFS contains:
-        #
-        # BGL_Ext_*.txt.gz
-        #
-        # No header present
-
-        file_df = spark.read.text(
-            HDFS_PATH
-        )
-
-        logger.info(
-            "BGL file(s) read successfully"
-        )
-
-        # --------------------------------------------------
-        # SPLIT PIPE DATA
-        # --------------------------------------------------
-
-        parts = split(
-            col("value"),
-            r"\|"
-        )
-
-        # --------------------------------------------------
-        # TRANSFORMATION
-        # --------------------------------------------------
-
-        parsed_df = file_df.select(
-
-            # ACCOUNT NO
-            concat(
-                substring(
-                    parts.getItem(0),
-                    8,
-                    7
-                ),
-                parts.getItem(1)
-            ).alias("ACCOUNT_NO"),
-
-            # BRANCH CODE
-            parts.getItem(1).alias(
-                "BRANCH_CODE"
-            ),
-
-            # PRODUCT
-            parts.getItem(2).alias(
-                "PRODUCT"
-            ),
-
-            # SEGMENT
-            parts.getItem(3).alias(
-                "SEGMENT"
-            ),
-
-            # AMOUNT
-            parts.getItem(4).alias(
-                "AMOUNT"
-            ),
-
-            # GLCC
-            parts.getItem(5).alias(
-                "GLCC"
-            ),
-
-            # ACCOUNT NAME
-            parts.getItem(6).alias(
-                "ACCOUNT_NAME"
-            ),
-
-            # STATUS
-            when(
-                regexp_replace(
-                    parts.getItem(7),
-                    "^0+",
-                    ""
-                ) == "",
-                "0"
-            ).otherwise(
-                regexp_replace(
-                    parts.getItem(7),
-                    "^0+",
-                    ""
-                )
-            ).alias("STATUS")
-
-        )
-
-        # --------------------------------------------------
-        # COUNT
-        # --------------------------------------------------
-
-        row_count = parsed_df.count()
-
-        logger.info(
-            f"Total rows : {row_count}"
-        )
-
-        # --------------------------------------------------
-        # WRITE DELTA
-        # --------------------------------------------------
-
-        (
-            parsed_df.write
-            .format("delta")
-            .mode("append")
-            .save(DELTA_PATH)
-        )
-
-        logger.info(
-            "Data written to Delta successfully"
-        )
-
-        # --------------------------------------------------
-        # MANIFEST
-        # --------------------------------------------------
-
-        create_manifest(
-            spark=spark,
-            BASE_MANIFEST_PATH=MANIFEST_BASE_PATH,
-            RUN_ID=run_id,
-            process_run_id=process_run_id,
-            logger=logger
-        )
-
-        # --------------------------------------------------
-        # SUCCESS LOG
-        # --------------------------------------------------
-
-        log_etl(
-            spark,
-            process_run_id,
-            "bgl_pipeline",
-            2,
-            f"BGL pipeline completed successfully. Rows={row_count}"
-        )
-
-        logger.info(
-            "========== BGL PIPELINE COMPLETED =========="
-        )
-
-    except Exception as e:
-
-        error_message = str(e)
-
-        if logger:
-            logger.error(error_message)
-
-        try:
-
-            log_etl(
-                spark,
-                process_run_id,
-                "bgl_pipeline",
-                3,
-                error_message
-            )
-
-        except Exception:
-            pass
-
-        raise
-
-    finally:
-
-        spark.stop()
+    return final_df
