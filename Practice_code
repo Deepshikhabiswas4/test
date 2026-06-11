@@ -1,10 +1,9 @@
 #ETL+1 pipeline
 
-
 import sys
 from datetime import datetime, timedelta
 from pyspark.sql import functions as F
-from pyspark.sql.functions import col, lit, concat, substring
+from pyspark.sql.functions import col, lit, concat, substring, broadcast, when, coalesce, round, sum
 from pyspark.sql.types import DateType, DecimalType
 from delta.tables import DeltaTable 
 
@@ -19,6 +18,8 @@ from common.fileUtil import get_hdfs_base
 from common.fileUtil import tables_to_read
 from common.read_write_oracle import read_oracle, write_oracle,overwrite_oracle
 from common.constants import Process
+from common.provision import reverse_provision
+from common.check_monthend import check_MonthEnd_minus1
 # ==========================================================
 # Spark & ETL setup
 # ==========================================================
@@ -133,7 +134,7 @@ try:
     }).select("BRANCH_CODE","CURRENCY","CGL","BALANCE_DATE",col("CLOSING_BALANCE").alias("BALANCE"),"INR_BALANCE")
     logger.info(f"=== closing balance read successfully.")
     log_etl(spark, process_run_id, "reading_closing_balance", 2, f"Read records from Delta")
-
+ 
 except Exception as e:
     print(f"Error {e} while fetching data from {BALANCE} Table")
     # ==========================================================
@@ -141,7 +142,7 @@ except Exception as e:
     # ==========================================================
     try:
         closing_balance_df = read_oracle(spark, gl_balance_query)
-        closing_balance_df.show(20,False)
+        #closing_balance_df.show(20,False)
         log_etl(spark, process_run_id, "reading_closing_balance", 2, "Reading from GL BALANCE")
 
     except Exception as e:
@@ -151,6 +152,8 @@ except Exception as e:
         exit(1)
 
 closing_balance_df.cache()
+
+
 # ==========================================================
 # STEP 2: Normal day fast path
 # ==========================================================
@@ -164,9 +167,99 @@ if not is_year_end:
     opening_balance_df = closing_balance_df.withColumn(
         "BALANCE_DATE",
         lit(etl_plus_1_str).cast(DateType())
-    )      
-    opening_balance_df.show(20,False)
+    ) 
     log_etl(spark, process_run_id, "creating_opening_bal", 2, "Opening balance created")
+
+
+    if(check_MonthEnd_minus1()):
+          try:
+              if(RUN_ID>1):
+                  print(f"Deleting the Reversed Transactions for {etl_plus_1_str} from {TRANSACTIONS} Table")
+                  sql_query=f"""
+                  DELETE FROM {TRANSACTIONS}
+                  WHERE TRANSACTION_DATE = TO_DATE('{etl_plus_1_str}', 'yyyy-mm-dd')
+                    AND SOURCE_FLAG IN ('R')
+                  """
+                  conn.setAutoCommit(False)             
+                  statement = conn.createStatement()
+                  print("stmt")
+                  statement.execute(sql_query)
+                  conn.commit()
+              log_etl(spark,process_run_id , "reverse_provision",1,"Reverse Provision Start")
+              logger.info("Reverse Provision Started")
+              final_df = reverse_provision(spark,TRANSACTIONS).withColumn("TRANSACTION_DATE", F.to_date(F.lit(etl_plus_1_str), "yyyy-MM-dd"))
+              #final_df.show(20, False)
+            #   print("============================= reverse df============================")
+              try:
+                print(f"Writing to {TRANSACTIONS} table")
+                write_oracle(final_df,TRANSACTIONS)
+              except Exception as e:
+                  log_etl(spark,process_run_id , "reverse_provision",3,"Error in Reverse Provision transaction level")
+                  logger.info(f"Error {e} while writing into GL_TRANSACTIONS")
+
+              final_df = final_df.withColumn("BALANCE_DATE",F.to_date(F.lit(etl_plus_1_str), "yyyy-MM-dd")).withColumn("BALANCE", col("DEBIT_AMOUNT")+col("CREDIT_AMOUNT"))
+          
+              
+              try:
+                    
+                    #   ====================================================================
+                    currency_query = f"""(select * from currency_master)e"""
+                    currency_list = read_oracle(spark, currency_query)
+                    df_converted = (
+                    final_df.join(
+                        broadcast(currency_list),
+                        final_df["CURRENCY"] == currency_list["CURRENCY_CODE"],
+                        "left"
+                    ).select(
+                        col("BRANCH_CODE"),
+                        col("CURRENCY"),
+                        col("CGL"),
+                        col("BALANCE_DATE"),
+                        col("BALANCE"),
+                        col("CURRENCY_RATE")  
+                    ).withColumn(
+                        "APPLIED_RATE",
+                        when(col("CURRENCY") == "INR", lit(1))
+                        .otherwise(coalesce(col("CURRENCY_RATE"), lit(1)))
+                    ).withColumn(
+                        "INR_BALANCE",
+                        round(col("BALANCE") * col("APPLIED_RATE"),2).cast(DecimalType(25, 2))
+                    )
+                    )
+                    
+                    final_df = df_converted.select(
+                    "CGL",
+                    "CURRENCY",
+                    "BRANCH_CODE",
+                    "BALANCE",
+                    "INR_BALANCE",
+                    "BALANCE_DATE"
+                    )
+                    opening_balance_df = opening_balance_df.unionByName(final_df)
+                    opening_balance_df= opening_balance_df.groupBy("CGL","CURRENCY", "BRANCH_CODE").agg(
+                        sum(col("BALANCE")).alias("BALANCE"),
+                        sum(col("INR_BALANCE")).alias("INR_BALANCE"),
+                        F.first(col("BALANCE_DATE")).alias("BALANCE_DATE")                        
+                    )
+
+                    # opening_balance_df.show(20, False)
+
+                    # spark.stop()
+                    # sys.exit()
+                    # # print("============================= opening balance df============================")
+
+                #   ====================================================================
+                    log_etl(spark,process_run_id , "reverse_provision",2,"Reverse Provision completed")
+
+              except Exception as e:
+                  logger.info(f"Error {e} while merging reversal transactions ")  
+                  log_etl(spark,process_run_id , "reverse_provision",3,"Error in Reverse Provision transaction level")
+                  
+          except Exception as e:
+              log_etl(spark,process_run_id , "reverse_provision",3,"Error in Reverse Provision")
+              logger.error(f"Error {e} while loading or writing of reversed provision transactions")
+
+
 
 # ==========================================================
 # STEP 3: Year-end logic (only on March 31)
@@ -189,7 +282,7 @@ else:
 
         # Base Data: Setting the new date
         base_df = closing_balance_df.withColumn("BALANCE_DATE", lit(etl_plus_1_str).cast("date"))
-        base_df.show(20,False)
+        #base_df.show(20,False)
         base_df.cache()
         # 1. Load Masters for Filtering
         cgl_master_df = read_oracle(spark, "(SELECT CGL_NUMBER FROM CGL_MASTER WHERE BAL_FWD = 1) T1")
@@ -200,7 +293,7 @@ else:
         fwd_base_df = base_df.join(F.broadcast(cgl_master_df), 
                                     F.trim(F.col("CGL")) == F.trim(F.col("CGL_NUMBER")), 
                                     "inner").select("CGL","CURRENCY","BRANCH_CODE","BALANCE","INR_BALANCE","BALANCE_DATE")  
-        fwd_base_df.show(20,False)   
+        #fwd_base_df.show(20,False)   
         
         # ---  CGL 7 & 8 RULE ---
         rule_78_base = base_df.filter(F.col("CGL").rlike("^[78]"))
@@ -213,7 +306,7 @@ else:
 
         # Union (1 Foreign + 1 INR = 2 rows)
         df_78_final = original_78.unionByName(offset_78)
-        df_78_final.show(20,False)
+        #df_78_final.show(20,False)
         # --- CGL 2110505001 rule (Circle Branches) ---
         # Now automatically respects BAL_FWD=1 because it uses fwd_base_df
         df_circle_final = fwd_base_df.filter(F.col("CGL") == "2110505001") \
@@ -232,7 +325,7 @@ else:
         df_5_base = read_oracle(spark, f"""(SELECT * FROM {BALANCE} WHERE BALANCE_DATE = TO_DATE('{posting_date_str}', 'YYYY-MM-DD') 
                                 and cgl like '5%' and cgl in (select cgl_number from cgl_master where bal_fwd='1')) T1""")
         print(f"MEMO RAW DATAFRAME =====================================")
-        df_5_base.show(20,False)
+        #df_5_base.show(20,False)
 
         df_5_final = df_5_base.groupBy("BRANCH_CODE", "CURRENCY" ) \
             .agg(
@@ -243,7 +336,7 @@ else:
             .withColumn("BALANCE", F.negate(F.col("BALANCE"))) \
             .withColumn("INR_BALANCE", F.negate(F.col("INR_BALANCE"))) \
             .withColumn("BALANCE_DATE",lit(etl_plus_1_str).cast("date"))
-        df_5_final.show(20,False)
+        #df_5_final.show(20,False)
         print(f"-----------------> Count of MEMO A/C ==== {df_5_final.count()}")
         
 
@@ -259,13 +352,13 @@ else:
         common_cols = ["CGL", "CURRENCY", "BRANCH_CODE", "BALANCE_DATE", "BALANCE", "INR_BALANCE"]
         
         print(f"===========================>df_circle_final")
-        df_circle_final.show(500,False)
+        #df_circle_final.show(500,False)
         print(f"===========================>df_general_final")
-        df_general_final.show(500,False)
+        #df_general_final.show(500,False)
         print(f"===========================>df_5_final")
-        df_5_final.show(500,False)
+        #df_5_final.show(500,False)
         print(f"===========================>circle_profit")
-        circle_profit.show(500,False)
+        #circle_profit.show(500,False)
 
         opening_balance_df = df_78_final.select(*common_cols) \
                                 .unionByName(df_circle_final.select(*common_cols)) \
@@ -280,7 +373,7 @@ else:
         ).withColumn("BALANCE_DATE",lit(etl_plus_1_str).cast("date")).select(*common_cols)
         opening_balance_df.cache()
 
-        # opening_balance_df.show(200, False)
+        ## opening_balance_df.show(200, False)
         log_etl(spark, process_run_id, "creating_opening_bal", 2, "Opening balance created")
     else:
         logger.info("=== No active financial year. Skipping ===")
@@ -289,7 +382,7 @@ else:
         
 #  ==========================================================
 # STEP 4: Writing to Delta
-# ==========================================================
+# # ==========================================================
 logger.info(f"=== Writing opening balance to delta for {etl_plus_1_str} ===")
 log_etl(spark, process_run_id, "writing_opening_balance_delta", 1, "Writing to Delta Lake")
 
@@ -298,7 +391,6 @@ delta_final_df = opening_balance_df.select(
     col("BALANCE").cast(DecimalType(25, 4)).alias("CLOSING_BALANCE"),
     col("BALANCE_DATE")
 )
-
 
 delta_final_df.write.format("delta").mode("overwrite") \
     .option("replaceWhere", f"BALANCE_DATE = '{etl_plus_1_str}'") \
