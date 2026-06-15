@@ -104,7 +104,7 @@ def main(args):
                         "BALANCE": F.col("CLOSING_BALANCE")
                     }) \
                     .select("CGL", "CURRENCY", "BALANCE")
-                result_df.show(20, False)
+                # result_df.show(20, False)
                 
                 target_cgls = ['1260505001', '1260505003', '1111111111']
 
@@ -124,7 +124,7 @@ def main(args):
                     ).alias("summary")
                 )
                 summary_df.printSchema()
-                summary_df.show(truncate=False)
+                # summary_df.show(truncate=False)
                 
                 final_df = summary_df.select(
                     lit("CNTR Summary").alias(
@@ -133,7 +133,7 @@ def main(args):
                     lit(run_date).alias("date"),
                     col("summary")
                 )
-                final_df.show(100, False)
+                # final_df.show(100, False)
 
                 final_json = final_df.selectExpr(
                     "to_json(struct(*)) AS value"
@@ -264,6 +264,15 @@ def main(args):
                 '2148505019', '2148505021', '2148505022', '2148505024',
                 '2148505033', '2148505035', '1260505002', '1260505003'
             ]
+            cgl_list = """
+                '1111111111', '1111111112', '1260505001', '2148505001',
+                '1148505004', '1148505005', '1148505006', '1148505007',
+                '1148505010', '1148505012', '1148505014', '1148505020',
+                '2148505004', '2148505006', '2148505007', '2148505010',
+                '2148505011', '2148505014', '2148505016', '2148505018',
+                '2148505019', '2148505021', '2148505022', '2148505024',
+                '2148505033', '2148505035', '1260505002', '1260505003'
+            """
             
             # ======================================================
             # TODAY DATA
@@ -282,7 +291,7 @@ def main(args):
                     .filter(F.col("CGL").isin(target_cgls)) \
                     .select("BRANCH_CODE", "CURRENCY", "CGL", "T_BAL", "T_INR_BAL")
                 
-                today_df.show(25, False)
+                # today_df.show(25, False)
             except Exception as e:
                     print(f"Error {e} while fetching data from datalake")
                     today_df = read_oracle(
@@ -296,7 +305,7 @@ def main(args):
                                 BALANCE AS T_BAL,
                                 INR_BALANCE AS T_INR_BAL
                             FROM {BALANCE}
-                            WHERE CGL IN ({target_cgls})
+                            WHERE CGL IN ({cgl_list})
                             AND BALANCE_DATE = TO_DATE(
                                 '{run_date}',
                                 'DD-MM-YYYY'
@@ -304,6 +313,7 @@ def main(args):
                         ) T
                         """
                     )
+                    # today_df.show(25, False)
                    
 
             # ======================================================
@@ -321,7 +331,7 @@ def main(args):
                     }) \
                     .filter(F.col("CGL").isin(target_cgls)) \
                     .select("BRANCH_CODE", "CURRENCY", "CGL", "Y_BAL", "Y_INR_BAL")
-                yest_df.show(25, False)
+                # yest_df.show(25, False)
             except Exception as e:
                     print(f"Error {e} while fetching data from datalake")
                     yest_df = read_oracle(                         
@@ -335,7 +345,7 @@ def main(args):
                                 BALANCE AS Y_BAL,
                                 INR_BALANCE AS Y_INR_BAL
                             FROM {BALANCE}
-                            WHERE CGL IN ({target_cgls})
+                            WHERE CGL IN ({cgl_list})
                             AND BALANCE_DATE = TO_DATE(
                                 '{yesterday}',
                                 'DD-MM-YYYY'
@@ -343,6 +353,7 @@ def main(args):
                         ) Y
                         """
                     )
+                    # yest_df.show(25, False)
                 
             
             # ======================================================
@@ -466,7 +477,7 @@ def main(args):
                 col("TYPE"),
                 col("FINAL_FIRST_ERROR_DATE").alias("FIRST_ERROR_DATE")
             )
-            final_df.show(200, False)
+            # final_df.show(200, False)
 
             # ======================================================
             # WRITING TO ORACLE
