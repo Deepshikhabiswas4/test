@@ -1,35 +1,107 @@
-def insert_tracker_record(
+def discover_bgl_files(
         spark,
-        file_name,
-        file_date):
+        start_date,
+        end_date,
+        logger,
+        cbs_base_path):
     """
-    Creates tracker row before processing.
+    Discover all BGL files between
+    start_date and end_date.
+
+    Returns:
+        [
+            {
+                "file_path": "...",
+                "file_name": "...",
+                "file_date": date(...)
+            }
+        ]
     """
 
-    data = [
-        (
-            file_name,
-            file_date,
-            "NOT_PROCESSED",
-            None,
-            None
+    java_import(
+        spark._jvm,
+        "org.apache.hadoop.fs.FileSystem"
+    )
+
+    java_import(
+        spark._jvm,
+        "org.apache.hadoop.fs.Path"
+    )
+
+    fs = spark._jvm.FileSystem.get(
+        spark._jsc.hadoopConfiguration()
+    )
+
+    discovered_files = []
+
+    current_date = start_date
+
+    while current_date <= end_date:
+
+        folder_date = current_date.strftime(
+            "%d-%m-%Y"
         )
-    ]
 
-    columns = [
-        "FILE_NAME",
-        "FILE_DATE",
-        "STATUS",
-        "PROCESSED_TS",
-        "ERROR_MESSAGE"
-    ]
+        misc_path = (
+            f"{cbs_base_path}/"
+            f"{folder_date}/misc"
+        )
 
-    df = spark.createDataFrame(
-        data,
-        columns
+        logger.info(
+            f"Checking misc path : "
+            f"{misc_path}"
+        )
+
+        misc_path_obj = spark._jvm.Path(
+            misc_path
+        )
+
+        if not fs.exists(misc_path_obj):
+
+            logger.info(
+                f"misc folder not found "
+                f"for {folder_date}"
+            )
+
+            current_date += timedelta(days=1)
+
+            continue
+
+        files = fs.listStatus(
+            misc_path_obj
+        )
+
+        for file_status in files:
+
+            file_name = (
+                file_status
+                .getPath()
+                .getName()
+            )
+
+            if file_name.startswith(
+                    "BGL_Ext_"):
+
+                discovered_files.append(
+                    {
+                        "file_path":
+                            file_status
+                            .getPath()
+                            .toString(),
+
+                        "file_name":
+                            file_name,
+
+                        "file_date":
+                            current_date
+                    }
+                )
+
+        current_date += timedelta(days=1)
+
+    logger.info(
+        f"Total BGL files discovered : "
+        f"{len(discovered_files)}"
     )
 
-    write_oracle(
-        df,
-        "BGL_FILE_TRACKER"
-    )
+    return discovered_files
