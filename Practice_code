@@ -1,31 +1,64 @@
-# -----------------------------------
-# GET LAST PROCESSED DATE
-# -----------------------------------
+for file_info in bgl_files:
 
-last_processed_date = get_last_processed_date(
-    spark
-)
+    input_path = (
+        file_info["file_path"]
+    )
 
-start_date = (
-    last_processed_date +
-    timedelta(days=1)
-)
+    file_name = (
+        file_info["file_name"]
+    )
 
-# -----------------------------------
-# DISCOVER FILES
-# -----------------------------------
+    file_date = (
+        file_info["file_date"]
+    )
 
-bgl_files = discover_bgl_files(
-    spark=spark,
-    start_date=start_date,
-    end_date=today,
-    logger=logger,
-    cbs_base_path=
-        "/datalake/fincore/datalake/cbs_files"
-)
+    logger.info(
+        f"Processing "
+        f"{file_name}"
+    )
 
-logger.info(
-    f"Files available for "
-    f"processing : "
-    f"{len(bgl_files)}"
-)
+    try:
+
+        file_df = (
+            spark.read
+            .text(input_path)
+        )
+
+        # --------------------------------------------------
+        # KEEP YOUR EXISTING LOGIC UNCHANGED BELOW
+        # --------------------------------------------------
+
+        clean_df = file_df.filter(
+            (
+                col("value")
+                .startswith("|")
+            )
+            &
+            (
+                length(
+                    col("value")
+                ) > 10
+            )
+        )
+
+        parts = split(
+            col("value"),
+            r"\|"
+        )
+
+        parsed_df = clean_df.select(
+            ...
+        )
+
+        # Existing delta write
+        # Existing manifest creation
+
+    except Exception as e:
+
+        logger.error(
+            f"Error processing "
+            f"{file_name} : "
+            f"{str(e)}"
+        )
+
+        raise
