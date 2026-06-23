@@ -1,36 +1,16 @@
-def insert_tracker_record(
+def mark_processed(
         spark,
-        file_name,
-        file_date):
+        file_name):
     """
-    Insert new file into tracker table
-    before processing starts.
+    Mark file as successfully processed.
     """
 
-    tracker_data = [
-        (
-            file_name,
-            file_date,
-            "NOT_PROCESSED",
-            None,
-            None
-        )
-    ]
+    update_sql = f"""
+        UPDATE BGL_FILE_TRACKER
+           SET STATUS = 'PROCESSED',
+               PROCESSED_TS = SYSTIMESTAMP,
+               ERROR_MESSAGE = NULL
+         WHERE FILE_NAME = '{file_name}'
+    """
 
-    tracker_columns = [
-        "FILE_NAME",
-        "FILE_DATE",
-        "STATUS",
-        "PROCESSED_TS",
-        "ERROR_MESSAGE"
-    ]
-
-    tracker_df = spark.createDataFrame(
-        tracker_data,
-        tracker_columns
-    )
-
-    write_oracle(
-        tracker_df,
-        "BGL_FILE_TRACKER"
-    )
+    execute_query(update_sql)
