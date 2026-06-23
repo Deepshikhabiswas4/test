@@ -1,109 +1,28 @@
-# ======================================================
-# READING TODAY + YESTERDAY ONLY ONCE
-# ======================================================
+def get_last_processed_date(spark):
+    """
+    Reads Oracle tracker table and returns
+    latest successfully processed BGL date.
+    """
 
-try:
+    query = """
+    (
+        SELECT MAX(FILE_DATE) AS LAST_PROCESSED_DATE
+        FROM BGL_FILE_TRACKER
+        WHERE STATUS='PROCESSED'
+    )
+    """
 
-    balance_df = (
-        spark.read.format("delta")
-        .load(gl_delta_path)
-        .filter(
-            F.col("BALANCE_DATE").isin(
-                posting_date_str,
-                yesterday
-            )
-        )
-        .withColumns({
-            "BRANCH_CODE": F.substring(F.col("glcc"), 1, 5),
-            "CURRENCY": F.substring(F.col("glcc"), 6, 3),
-            "CGL": F.substring(F.col("glcc"), 9, 10)
-        })
-        .filter(F.col("CGL").isin(target_cgls))
+    tracker_df = read_oracle(
+        spark=spark,
+        table=query
     )
 
-    today_df = (
-        balance_df
-        .filter(
-            F.col("BALANCE_DATE") == posting_date_str
-        )
-        .select(
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL",
-            F.col("CLOSING_BALANCE").alias("T_BAL"),
-            F.col("INR_BALANCE").alias("T_INR_BAL")
-        )
-    )
+    row = tracker_df.collect()[0]
 
-    yest_df = (
-        balance_df
-        .filter(
-            F.col("BALANCE_DATE") == yesterday
-        )
-        .select(
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL",
-            F.col("CLOSING_BALANCE").alias("Y_BAL"),
-            F.col("INR_BALANCE").alias("Y_INR_BAL")
-        )
-    )
+    if row["LAST_PROCESSED_DATE"] is None:
+        return datetime.strptime(
+            "01-01-2025",
+            "%d-%m-%Y"
+        ).date()
 
-except Exception as e:
-
-    print(f"Error {e} while fetching data from datalake")
-
-    balance_df = read_oracle(
-        spark,
-        f"""
-        (
-            SELECT
-                BALANCE_DATE,
-                BRANCH_CODE,
-                CURRENCY,
-                CGL,
-                BALANCE,
-                INR_BALANCE
-            FROM {BALANCE}
-            WHERE CGL IN ({cgl_list})
-            AND BALANCE_DATE BETWEEN
-                TO_DATE('{yesterday}','DD-MM-YYYY')
-            AND
-                TO_DATE('{run_date}','DD-MM-YYYY')
-        ) T
-        """
-    )
-
-    today_df = (
-        balance_df
-        .filter(
-            F.date_format(
-                F.col("BALANCE_DATE"),
-                "dd-MM-yyyy"
-            ) == run_date
-        )
-        .select(
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL",
-            F.col("BALANCE").alias("T_BAL"),
-            F.col("INR_BALANCE").alias("T_INR_BAL")
-        )
-    )
-
-    yest_df = (
-        balance_df
-        .filter(
-            F.date_format(
-                F.col("BALANCE_DATE"),
-                "dd-MM-yyyy"
-            ) == yesterday
-        )
-        .select(
-            "BRANCH_CODE",
-            "CURRENCY",
-            "CGL",
-            F.col("BALANCE").alias("Y_BAL"),
-            F.col("INR_BALANCE").alias("Y_INR_BAL")
-        )
-    )
+    return row["LAST_PROCESSED_DATE"]
