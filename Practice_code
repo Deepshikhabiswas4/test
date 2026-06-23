@@ -1,107 +1,31 @@
-def discover_bgl_files(
-        spark,
-        start_date,
-        end_date,
-        logger,
-        cbs_base_path):
-    """
-    Discover all BGL files between
-    start_date and end_date.
+# -----------------------------------
+# GET LAST PROCESSED DATE
+# -----------------------------------
 
-    Returns:
-        [
-            {
-                "file_path": "...",
-                "file_name": "...",
-                "file_date": date(...)
-            }
-        ]
-    """
+last_processed_date = get_last_processed_date(
+    spark
+)
 
-    java_import(
-        spark._jvm,
-        "org.apache.hadoop.fs.FileSystem"
-    )
+start_date = (
+    last_processed_date +
+    timedelta(days=1)
+)
 
-    java_import(
-        spark._jvm,
-        "org.apache.hadoop.fs.Path"
-    )
+# -----------------------------------
+# DISCOVER FILES
+# -----------------------------------
 
-    fs = spark._jvm.FileSystem.get(
-        spark._jsc.hadoopConfiguration()
-    )
+bgl_files = discover_bgl_files(
+    spark=spark,
+    start_date=start_date,
+    end_date=today,
+    logger=logger,
+    cbs_base_path=
+        "/datalake/fincore/datalake/cbs_files"
+)
 
-    discovered_files = []
-
-    current_date = start_date
-
-    while current_date <= end_date:
-
-        folder_date = current_date.strftime(
-            "%d-%m-%Y"
-        )
-
-        misc_path = (
-            f"{cbs_base_path}/"
-            f"{folder_date}/misc"
-        )
-
-        logger.info(
-            f"Checking misc path : "
-            f"{misc_path}"
-        )
-
-        misc_path_obj = spark._jvm.Path(
-            misc_path
-        )
-
-        if not fs.exists(misc_path_obj):
-
-            logger.info(
-                f"misc folder not found "
-                f"for {folder_date}"
-            )
-
-            current_date += timedelta(days=1)
-
-            continue
-
-        files = fs.listStatus(
-            misc_path_obj
-        )
-
-        for file_status in files:
-
-            file_name = (
-                file_status
-                .getPath()
-                .getName()
-            )
-
-            if file_name.startswith(
-                    "BGL_Ext_"):
-
-                discovered_files.append(
-                    {
-                        "file_path":
-                            file_status
-                            .getPath()
-                            .toString(),
-
-                        "file_name":
-                            file_name,
-
-                        "file_date":
-                            current_date
-                    }
-                )
-
-        current_date += timedelta(days=1)
-
-    logger.info(
-        f"Total BGL files discovered : "
-        f"{len(discovered_files)}"
-    )
-
-    return discovered_files
+logger.info(
+    f"Files available for "
+    f"processing : "
+    f"{len(bgl_files)}"
+)
