@@ -1,15 +1,21 @@
-def mark_processed(
+def mark_failed(
         spark,
-        file_name):
+        file_name,
+        error_message):
     """
-    Mark file as successfully processed.
+    Mark file as failed.
     """
+
+    error_message = (
+        str(error_message)
+        .replace("'", " ")
+    )
 
     update_sql = f"""
         UPDATE BGL_FILE_TRACKER
-           SET STATUS = 'PROCESSED',
+           SET STATUS = 'FAILED',
                PROCESSED_TS = SYSTIMESTAMP,
-               ERROR_MESSAGE = NULL
+               ERROR_MESSAGE = '{error_message}'
          WHERE FILE_NAME = '{file_name}'
     """
 
