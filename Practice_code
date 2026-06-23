@@ -1,28 +1,35 @@
-def get_last_processed_date(spark):
+def insert_tracker_record(
+        spark,
+        file_name,
+        file_date):
     """
-    Reads Oracle tracker table and returns
-    latest successfully processed BGL date.
+    Creates tracker row before processing.
     """
 
-    query = """
-    (
-        SELECT MAX(FILE_DATE) AS LAST_PROCESSED_DATE
-        FROM BGL_FILE_TRACKER
-        WHERE STATUS='PROCESSED'
+    data = [
+        (
+            file_name,
+            file_date,
+            "NOT_PROCESSED",
+            None,
+            None
+        )
+    ]
+
+    columns = [
+        "FILE_NAME",
+        "FILE_DATE",
+        "STATUS",
+        "PROCESSED_TS",
+        "ERROR_MESSAGE"
+    ]
+
+    df = spark.createDataFrame(
+        data,
+        columns
     )
-    """
 
-    tracker_df = read_oracle(
-        spark=spark,
-        table=query
+    write_oracle(
+        df,
+        "BGL_FILE_TRACKER"
     )
-
-    row = tracker_df.collect()[0]
-
-    if row["LAST_PROCESSED_DATE"] is None:
-        return datetime.strptime(
-            "01-01-2025",
-            "%d-%m-%Y"
-        ).date()
-
-    return row["LAST_PROCESSED_DATE"]
