@@ -1,22 +1,242 @@
-def mark_failed(
-        spark,
-        file_name,
-        error_message):
-    """
-    Mark file as failed.
-    """
+def main():
 
-    error_message = (
-        str(error_message)
-        .replace("'", " ")
-    )
+    logger = None
 
-    update_sql = f"""
-        UPDATE BGL_FILE_TRACKER
-           SET STATUS = 'FAILED',
-               PROCESSED_TS = SYSTIMESTAMP,
-               ERROR_MESSAGE = '{error_message}'
-         WHERE FILE_NAME = '{file_name}'
-    """
+    try:
 
-    execute_query(update_sql)
+        # ==========================================
+        # SPARK SESSION
+        # ==========================================
+
+        spark = SparkSession.builder \
+            .appName("BGL_PIPELINE") \
+            .getOrCreate()
+
+        # ==========================================
+        # ETL DATE
+        # ==========================================
+
+        etl_date = get_etl_date()
+
+        logger = setup_logger(
+            "BGL",
+            run_id,
+            str(etl_date)
+        )
+
+        logger.info(
+            f"ETL Date : {etl_date}"
+        )
+
+        # ==========================================
+        # LAST PROCESSED DATE
+        # ==========================================
+
+        last_processed_date = get_last_processed_date(
+            spark
+        )
+
+        logger.info(
+            f"Last Processed Date : "
+            f"{last_processed_date}"
+        )
+
+        start_date = (
+            last_processed_date +
+            timedelta(days=1)
+        )
+
+        # ==========================================
+        # DISCOVER FILES
+        # ==========================================
+
+        bgl_files = discover_bgl_files(
+            spark=spark,
+            start_date=start_date,
+            end_date=etl_date,
+            logger=logger,
+            cbs_base_path="/datalake/fincore/datalake/cbs_files"
+        )
+
+        logger.info(
+            f"Total files discovered : "
+            f"{len(bgl_files)}"
+        )
+
+        # ==========================================
+        # PROCESS FILES
+        # ==========================================
+
+        for file_info in bgl_files:
+
+            input_path = file_info["file_path"]
+            file_name = file_info["file_name"]
+            file_date = file_info["file_date"]
+
+            logger.info(
+                f"Processing file : "
+                f"{file_name}"
+            )
+
+            # ======================================
+            # SKIP IF ALREADY PROCESSED
+            # ======================================
+
+            if is_processed(
+                    spark,
+                    file_name):
+
+                logger.info(
+                    f"{file_name} already processed"
+                )
+
+                continue
+
+            try:
+
+                # ==================================
+                # READ FILE
+                # ==================================
+
+                file_df = spark.read.text(
+                    input_path
+                )
+
+                logger.info(
+                    "File read successfully"
+                )
+
+                # ==================================
+                # CLEAN DATA
+                # ==================================
+
+                clean_df = file_df.filter(
+                    (
+                        col("value")
+                        .startswith("|")
+                    )
+                    &
+                    (
+                        length(col("value"))
+                        > 10
+                    )
+                )
+
+                parts = split(
+                    col("value"),
+                    r"\|"
+                )
+
+                # ==================================
+                # PARSE DATA
+                # ==================================
+
+                parsed_df = clean_df.select(
+
+                    # KEEP YOUR EXISTING
+                    # parsed_df.select(...)
+                    # EXACTLY AS IT IS
+
+                )
+
+                logger.info(
+                    "Parsed DF created"
+                )
+
+                row_count = (
+                    parsed_df.count()
+                )
+
+                logger.info(
+                    f"Rows : {row_count}"
+                )
+
+                # ==================================
+                # DELTA WRITE
+                # ==================================
+
+                parsed_df.write \
+                    .format("delta") \
+                    .mode("append") \
+                    .save(BGL_DELTA_PATH)
+
+                logger.info(
+                    "Delta write completed"
+                )
+
+                # ==================================
+                # MANIFEST
+                # ==================================
+
+                create_manifest(
+                    spark=spark,
+                    BASE_MANIFEST_PATH=
+                        MANIFEST_PATH,
+                    RUN_ID=run_id,
+                    process_run_id=
+                        process_run_id,
+                    logger=logger
+                )
+
+                # ==================================
+                # INSERT TRACKER RECORD
+                # ONLY AFTER SUCCESS
+                # ==================================
+
+                tracker_df = (
+                    spark.createDataFrame(
+                        [
+                            (
+                                file_name,
+                                file_date
+                            )
+                        ],
+                        [
+                            "FILE_NAME",
+                            "FILE_DATE"
+                        ]
+                    )
+                )
+
+                write_oracle(
+                    tracker_df,
+                    "BGL_FILE_TRACKER"
+                )
+
+                logger.info(
+                    f"{file_name} "
+                    f"completed successfully"
+                )
+
+            except Exception as e:
+
+                logger.error(
+                    f"Error processing "
+                    f"{file_name}"
+                )
+
+                logger.error(
+                    str(e)
+                )
+
+                raise
+
+        logger.info(
+            "BGL Processing Completed"
+        )
+
+    except Exception as e:
+
+        if logger:
+            logger.error(
+                str(e)
+            )
+
+        raise
+
+    finally:
+
+        try:
+            spark.stop()
+        except:
+            pass
