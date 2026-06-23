@@ -1,24 +1,36 @@
-def is_processed(
+def insert_tracker_record(
         spark,
-        file_name):
+        file_name,
+        file_date):
     """
-    Check if file is already processed.
+    Insert new file into tracker table
+    before processing starts.
     """
 
-    query = f"""
-    (
-        SELECT COUNT(*) AS CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_NAME = '{file_name}'
-          AND STATUS = 'PROCESSED'
+    tracker_data = [
+        (
+            file_name,
+            file_date,
+            "NOT_PROCESSED",
+            None,
+            None
+        )
+    ]
+
+    tracker_columns = [
+        "FILE_NAME",
+        "FILE_DATE",
+        "STATUS",
+        "PROCESSED_TS",
+        "ERROR_MESSAGE"
+    ]
+
+    tracker_df = spark.createDataFrame(
+        tracker_data,
+        tracker_columns
     )
-    """
 
-    tracker_df = read_oracle(
-        spark=spark,
-        table=query
-    )
-
-    return (
-        tracker_df.collect()[0]["CNT"] > 0
+    write_oracle(
+        tracker_df,
+        "BGL_FILE_TRACKER"
     )
