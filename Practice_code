@@ -1,301 +1,268 @@
-# BGL PIPELINE
+import datetime 
+from pyspark.sql import SparkSession , functions as F
+import pyspark.sql.types as T
 
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
+from pyspark.sql.functions import  to_date,expr, round, lower, col,when, length, trim,count, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp, first, input_file_name,create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp, first, input_file_name,substring_index
+from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType, TimestampType
+from datetime import date, timedelta
+from pyspark.sql.functions import desc
 import sys
-import os
-from datetime import datetime, timedelta
 from py4j.java_gateway import java_import
-from pyspark.sql.functions import col, split, substring, concat, regexp_replace, when, length
-from common.dateUtil import get_etl_date
-from common.fileUtil import paths_for_read
-from common.processRun import get_process_run_id
-from common.processRun import get_run_id
-from common.log_etl_modified import log_etl
-from common.constants import Process
-from common.logger import setup_logger
-from common.fileUtil import get_hdfs_base
+from delta.tables import DeltaTable 
+import concurrent.futures
+import builtins
+from pyspark.sql import Row
+from pyspark.sql.functions import expr, lpad, floor, concat_ws
+from pyspark.sql.functions import ltrim, col
+
+import re   
+# =========== Common Methods =============================
 from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base
+from datetime import datetime,date
+from common.read_write_oracle import read_oracle
 from common.create_path_if_not_exists import create_path_if_not_exists
-from pathlib import Path
-from common.read_write_oracle import read_oracle, write_oracle
+from pyspark.sql.functions import col, trim, substring,regexp_replace
+from collections import defaultdict
+from common.pattern import read_patterns
+from common.properties import get_oracle_properties
+from common.dateUtil import get_etl_date
 
+def main(type,spark,BASE_HDFS,etl_date):
+    print(f"{type} Started Exexution")
+    
+    date_str = etl_date
+    date_obj = datetime.strptime(date_str, "%d-%m-%Y")    
+    year = date_obj.strftime("%Y")
+    month = date_obj.strftime("%b").upper()
+    day = date_obj.strftime("%d")
+    
+    posting_date_str = date_obj.strftime("%Y-%m-%d")
 
-# ==========================================================
-# MANIFEST CREATION
-# ==========================================================
-def create_manifest(spark, BASE_MANIFEST_PATH, RUN_ID, process_run_id, logger):
-    try:
-        etl_date_path = get_etl_date(spark).strftime("%Y%m%d")
-        hdfs_dir = f"{BASE_MANIFEST_PATH}/{etl_date_path}"
-        java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-        java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-        fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
+    output_date = date_obj.strftime("%d-%b-%y").upper()
 
-        manifest_filename = (f"BGL_successful_{RUN_ID}_Manifest.txt")
-        dest_file_path = spark._jvm.Path(f"{hdfs_dir}/{manifest_filename}")
+    input_path = f"{BASE_HDFS}/CBS-FILES/{date_str}/BANCS24"
+    output_path =  f"{BASE_HDFS}/druid-data-lake/{year}/{month}/{day}/BANCS24/"
 
-        log_etl(spark,process_run_id,"bgl_manifest_writing",1,"Starting manifest stage.")
+    print(f"====={year}============{month}==============={day}===============> is the date")
 
-        hdfs_dir_obj = spark._jvm.Path(hdfs_dir)
+    
+    
+    query = f"""(select FILE_NAME,HDFS_ROW_COUNT from controll_file_master where ETL_DATE = '{output_date}' and FILE_TYPE ='CBS'  and FILE_NAME like '{type}%' and HDFS_ROW_COUNT > 0) e""" 
+    control_file_master_df = read_oracle(spark, query)
+    
+ 
+    # Extract the values into a list of Row objects, then pull the specific field
+    my_list = [row['FILE_NAME'] for row in control_file_master_df.select('FILE_NAME').collect()]
 
-        if not fs.exists(hdfs_dir_obj):
-            fs.mkdirs(hdfs_dir_obj)
+    if  len(my_list)==0:
+        print(f"------------->Stopping Pipeline because control file master has no data for selected date - {output_date} .<--------------")
+        
 
-        out_stream = fs.create(dest_file_path, True)
-        out_stream.write(bytearray("BGL successfully loaded","utf-8"))
-        out_stream.close()
+    print(my_list)
+    pattern = r'^(.*?)(\d{8})_([a-zA-Z]).*$'
+    grouped = defaultdict(list)
+    for fname in my_list:
 
-        logger.info(f"Manifest written to HDFS : {dest_file_path}")
-        log_etl(spark,process_run_id,"bgl_manifest_writing",2,"Manifest uploaded successfully.")
+        match = re.match(pattern, fname)
+        if match:
+            stream = match.group(3)
+            grouped[stream].append(fname)
+    all_paths = []
+    for stream, files in grouped.items():
+        paths = [f"{input_path}/{stream}/{ft}.gz" for ft in files]
+        all_paths.extend(paths)
 
-    except Exception as e:
-        logger.error(f"Error in manifest creation : {e}")
-        log_etl(spark,process_run_id,"bgl_manifest_writing",3,"Error in creating manifest file")
-        raise
+    found_paths,unfound_paths = read_patterns(spark,all_paths)
+        
+    df_raw = spark.read.format("text").load(found_paths).withColumn("FILE_NAME", regexp_replace(substring_index(input_file_name(), "/",-1), r"\.gz$",""))
+    
+    
+    file_count_df = df_raw.groupBy("FILE_NAME").agg(count("*").alias("ROW_COUNT"))
+
+    comparison_df = (
+        control_file_master_df.alias("c")
+        .join(
+            file_count_df.alias("f"),
+            ["FILE_NAME"],
+            "full_outer"
+        )
+        .select(
+            col("FILE_NAME"),
+            col("c.HDFS_ROW_COUNT").cast("decimal(25)"),
+            col("f.ROW_COUNT").alias("DATA_LAKE_COUNT")
+        )
+    )
+
+    
+    
+    comparison_df =comparison_df.withColumn("DATA_LAKE_STATUS",
+                                            F.when(col("HDFS_ROW_COUNT")==col("DATA_LAKE_COUNT"),"YES")
+                                            )
+    existing_files_count = comparison_df.filter(col("DATA_LAKE_COUNT").isNotNull() & col("DATA_LAKE_STATUS").isNotNull())
+
+    unmatched_files = comparison_df.filter(col("DATA_LAKE_COUNT").isNull() | col("DATA_LAKE_STATUS").isNull() | col("DATA_LAKE_STATUS").isNull())
+    unmatch_count = unmatched_files.count()
+    missing_unmatch = unmatched_files._jdf.showString(2000, 40, False)
+
+    # =======================================
+    oracle_properties = get_oracle_properties()
+    conn = spark._sc._gateway.jvm.java.sql.DriverManager.getConnection(
+        oracle_properties["url"],
+        oracle_properties["user"],
+        oracle_properties["password"]
+    )
+    conn.setAutoCommit(False)
+    update_sql = """
+    UPDATE CONTROLL_FILE_MASTER
+    SET DATA_LAKE_COUNT = ?,
+        DATA_LAKE_STATUS = ?
+    WHERE FILE_NAME = ?
+    AND ETL_DATE = ?
+    """
+
+    stmt = conn.prepareStatement(update_sql)
+    for row in existing_files_count.collect():
+        stmt.setInt(1, int(row["DATA_LAKE_COUNT"]))
+        stmt.setString(2, row["DATA_LAKE_STATUS"])
+        stmt.setString(3, row["FILE_NAME"])
+        stmt.setString(4, output_date)
+        stmt.addBatch()
+    stmt.executeBatch()
+    conn.commit()
+    stmt.close()
+    conn.close()
+
+    
     
 
-def get_last_processed_date(spark):
-    """
-    Reads Oracle tracker table and returns
-    latest successfully processed BGL date.
-    """
-    query = """
-    (
-        SELECT MAX(FILE_DATE) AS LAST_PROCESSED_DATE
-        FROM BGL_FILE_TRACKER
-        WHERE STATUS='PROCESSED'
-    )
-    """
-    tracker_df = read_oracle(spark=spark,table=query)
-    row = tracker_df.collect()[0]
-    if row["LAST_PROCESSED_DATE"] is None:
-        return datetime.strptime("01-01-2025","%d-%m-%Y").date()
-    return row["LAST_PROCESSED_DATE"]
+    query_parm = f"""(select * from FILE_DATA_PARAMETERS where FILE_TYPE ='{type}') e"""
+    parameters = read_oracle(spark, query_parm)
+    metadata = parameters.collect()
+    columns = []
+    transformed_df = df_raw
+    for row in metadata:
+       if row["TO_BE_INCLUDED"] == "yes":
+           column_name = row["COLUMN_NAME"]
+           columns.append(column_name)
+           start_pos = int(row["START_POSITION"])
+           end_pos = int(row["END_POSITION"]) -1
+           length = end_pos - start_pos + 1
+           transformed_df = transformed_df.withColumn(
+               column_name,
+               trim(
+                   substring(
+                       col("value"),
+                       start_pos,
+                       length
+                   )
+               )
+           )
+    
+    transformed_df =transformed_df.drop("value")
+    
+    
+    if type == "INV":
+        cols_to_convert=["BALANCE","INT_AVAILABLE","INT_ADJUSTMENT","OD_DR_INT_AVAIL","DR_INT_ADJUSTMENT","OD_PENALTY_INT_ACCR","OD_PENALTY_INT_ADJ","OD_DR_INT_INCR","INT_INCR"]
+    if type == "BOR":
+        print("BOR")
+        cols_to_convert=["BALANCE","LOAN_TERM","APP_AMT","ADV_VAL","COLLECTION_AMT","INT_ACCR","BPI_ACCR","CI_ACCR","INT_ADJUSTMENT","ARR_INT_ACCR","ARR_INT_ADJUSTMENT"]
+    if type in ("GLCCCTA","GLCCGEN"):
+        cols_to_convert=["AMOUNT"]
+        transformed_df = transformed_df.withColumn("ACCOUNT",lit("NA"))
+    if type == "GLCCINV":
+        cols_to_convert=["AMOUNT"]
 
+    comp1_col =["CGL_COMP_1_DR","CGL_COMP_1_CR"]
+    comp2_col =["CGL_COMP_2_DR","CGL_COMP_2_CR"]
 
-def is_processed(spark,file_name):
-    """
-    Check if file is already processed.
-    """
-    query = f"""
-    (
-        SELECT COUNT(*) AS CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_NAME = '{file_name}'
-          AND STATUS = 'PROCESSED'
-    )
-    """
-    tracker_df = read_oracle(spark=spark,table=query)
-    return (tracker_df.collect()[0]["CNT"] > 0)
-
-
-def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
-    """
-    Discover all BGL files between
-    start_date and end_date.
-
-    Returns:
-        [
-            {
-                "file_path": "...",
-                "file_name": "...",
-                "file_date": date(...)
-            }
-        ]
-    """
-    java_import(spark._jvm,"org.apache.hadoop.fs.FileSystem")
-    java_import(spark._jvm,"org.apache.hadoop.fs.Path")
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-
-    discovered_files = []
-    current_date = start_date
-
-    while current_date <= end_date:
-        folder_date = current_date.strftime("%d-%m-%Y")
-        misc_path = (f"{bgl_base_path}/"f"{folder_date}/misc")
-        logger.info(f"Checking misc path : "f"{misc_path}")
-        misc_path_obj = spark._jvm.Path(misc_path)
-
-        if not fs.exists(misc_path_obj):
-            logger.info(f"misc folder not found "f"for {folder_date}")
-            current_date += timedelta(days=1)
-            continue
-
-        files = fs.listStatus(misc_path_obj)
-        for file_status in files:
-            file_name = (file_status.getPath().getName())
-            if file_name.startswith("BGL_Ext_"):
-                discovered_files.append(
-                    {
-                        "file_path":file_status.getPath().toString(),
-                        "file_name":file_name,
-                        "file_date":current_date
-                    }
-                )
-        current_date += timedelta(days=1)
-
-    logger.info(f"Total BGL files discovered : "f"{len(discovered_files)}")
-    return discovered_files
-
-            
+     
+    
+    for col_name in cols_to_convert:
+        transformed_df = transformed_df.withColumn(
+        col_name,
+        F.when(F.col(col_name).isNull(), None)
+        .when(
+        F.substring(F.col(col_name), -1, 1) == "-",
+        F.regexp_replace(F.col(col_name), "[-+]$", "").cast("decimal(25,4)") * -1
+        )
+        .otherwise(
+        F.regexp_replace(F.col(col_name), "[-+]$", "").cast("decimal(25,4)")
+        )
+        ).withColumn("ACCOUNT",
+        regexp_replace(col("ACCOUNT"), r"^0+", ""))
         
-# ==========================================================
-# MAIN
-# ==========================================================
+    if type not in ("GLCCCTA","GLCCGEN","GLCCINV"):
+        for c in comp1_col:
+            transformed_df = transformed_df.withColumn(c, F.substring(F.col(c),-4,4))
+        for c in comp2_col:
+            transformed_df = transformed_df.withColumn(c, F.substring(F.col(c),-2,2))
+    if type in ("GLCCCTA","GLCCGEN"):
+        transformed_df= transformed_df.select(*columns,"ACCOUNT").withColumn("TRANS_DATE", to_date(lit(posting_date_str)))
+    else:
+        transformed_df= transformed_df.select(*columns).withColumn("TRANS_DATE", to_date(lit(posting_date_str)))
+
+    
+    path = f'{output_path}/{type}'
+    res = create_path_if_not_exists(spark,path)
+    print(res)
+    transformed_df.write.format("delta").mode("overwrite").save(path)
+    rows = transformed_df.count()
+
+    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
+    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
+    hdfs_dir = f"{output_path}/info/"    
+    manifest_filename = f"{type}_MissPath_{len(unfound_paths)}_RowDiff_{unmatch_count}_Total_{rows}.txt"
+    dest_file_path = spark._jvm.Path(f"{hdfs_dir}/{manifest_filename}")
+    hdfs_dir_obj = spark._jvm.Path(hdfs_dir)
+    if not fs.exists(hdfs_dir_obj):
+        fs.mkdirs(hdfs_dir_obj)
+    out_stream = fs.create(dest_file_path, True)
+    unfound_paths= ", ".join([f"'{x}'" for x in unfound_paths])
+    
+    text_file = unfound_paths +"\n"+ missing_unmatch
+    print(text_file)
+    out_stream.write(bytearray(text_file, "utf-8"))
+    out_stream.close()
+
+
+ 
+
+
 
 if __name__ == "__main__":
-    # PROCESS_ID = Process.BGL
-    HDFS_BASE = get_hdfs_base()
-    spark = create_spark_session("BGL_PIPELINE", HDFS_BASE)
-
-    spark.sparkContext.setLogLevel("ERROR")
-
-    process_run_id = None
-    run_id = None
-    logger = None
-
-    try:
-        today = get_etl_date(spark)
-        posting_date_str = today.strftime("%Y-%m-%d")
-        today_str = posting_date_str
-        # process_run_id = (
-        #     sys.argv[1] if len(sys.argv) > 1
-        #     else get_process_run_id(spark, PROCESS_ID, posting_date_str)
-        # )
-        # run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
-        # logger = setup_logger("BGL", run_id, posting_date_str)
-        # logger.info("========== BGL PIPELINE STARTED ==========")
-
-        # # to add this type "bgl" in paths_for_read function==== done
-        hdfs_paths = paths_for_read("bgl", today, posting_date_str)
-        HDFS_PATH = hdfs_paths["HDFS_PATH"]
-        BGL_DATALAKE_PATH = hdfs_paths["BGL_DATALAKE_PATH"]
-        MANIFEST_BASE_PATH = hdfs_paths["MANIFEST_BASE_PATH"]
-
-        logger.info(f"HDFS_PATH : {HDFS_PATH}")
-        logger.info(f"DELTA_PATH : {BGL_DATALAKE_PATH}")
-        logger.info(f"MANIFEST_FILE_PATH : {MANIFEST_BASE_PATH}")
-
-        log_etl(spark,process_run_id,"bgl_pipeline",1,"BGL pipeline started")
-        # ==========================================
-        # LAST PROCESSED DATE
-        # ==========================================
-
-        last_processed_date = get_last_processed_date(spark)
-        logger.info(f"Last Processed Date : "f"{last_processed_date}")
-        start_date = (last_processed_date +timedelta(days=1))
-
-        # ==========================================
-        # DISCOVER FILES
-        # ==========================================
-
-        bgl_files = discover_bgl_files(spark=spark,start_date=start_date,end_date=today,logger=logger,cbs_base_path="/datalake/fincore/datalake/cbs_files")
-        logger.info(f"Total files discovered : "f"{len(bgl_files)}")
-
-        # ==========================================
-        # PROCESS FILES
-        # ==========================================
-
-        for file_info in bgl_files:
-
-            input_path = file_info["file_path"]
-            file_name = file_info["file_name"]
-            file_date = file_info["file_date"]
-
-            logger.info(
-                f"Processing file : "
-                f"{file_name}"
-            )
-
-            # ======================================
-            # SKIP IF ALREADY PROCESSED
-            # ======================================
-
-            if is_processed(spark,file_name):
-                logger.info(f"{file_name} already processed")
-                continue
-
+    
+   BASE_HDFS = get_hdfs_base()
+   spark = create_spark_session("CBS - Bulk Data PIPELINE", BASE_HDFS)
+   types = ["INV", "BOR", "GLCCGEN", "GLCCCTA", "GLCCINV"]
+    # today = get_etl_date(spark)
+    # posting_date_str = today.strftime("%d-%m-%Y")
+    # dates = [posting_date_str, posting_date_str]
+   dates = ["11-05-2026","11-05-2026"] 
+   dates = ["01-06-2026","01-06-2026"] 
+   for etl_date in dates:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(main, type, spark, BASE_HDFS,etl_date) for type in types]
+        for future in concurrent.futures.as_completed(futures):
             try:
-
-                # ==================================
-                # READ FILE
-                # ==================================
-
-                file_df = spark.read.text(input_path)
-
-                logger.info("File read successfully")
-
-                # ==================================
-                # CLEAN DATA
-                # ==================================
-
-                clean_df = file_df.filter((col("value").startswith("|"))&(length(col("value"))> 10))
-
-                parts = split(col("value"),r"\|")
-
-                # ==================================
-                # PARSE DATA
-                # ==================================
-
-                parsed_df = clean_df.select(
-                    concat(substring(
-                        parts.getItem(0),8,7),parts.getItem(1)).alias("ACCOUNT_NO"),
-                        parts.getItem(1).alias("BRANCH_CODE"),
-                        parts.getItem(2).alias("PRODUCT"),
-                        parts.getItem(3).alias("SEGMENT"),
-                        parts.getItem(4).alias("AMOUNT"),
-                        parts.getItem(5).alias("GLCC"),
-                        parts.getItem(6).alias("ACCOUNT_NAME"),
-                        when(regexp_replace(parts.getItem(7),"^0+","") == "","0")
-                        .otherwise(regexp_replace(parts.getItem(7),"^0+","")).alias("STATUS")
-                )
-                parsed_df.show(20, False)
-                logger.info("Parsed DF created")
-                row_count = (parsed_df.count())
-
-                logger.info(f"Rows : {row_count}")
-
-                # ==================================
-                # DELTA WRITE
-                # ==================================
-
-                parsed_df.write \
-                    .format("delta") \
-                    .mode("append") \
-                    .save(BGL_DATALAKE_PATH)
-
-                logger.info("Delta write completed")
-
-                # ==================================
-                # MANIFEST
-                # ==================================
-
-                create_manifest(spark=spark,BASE_MANIFEST_PATH=MANIFEST_BASE_PATH,RUN_ID=run_id,process_run_id=    process_run_id,logger=logger)
-
-                # ==================================
-                # INSERT TRACKER RECORD
-                # ONLY AFTER SUCCESS
-                # ==================================
-                tracker_df = (spark.createDataFrame([(file_name,file_date)],["FILE_NAME","FILE_DATE"]))
-
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-
-                logger.info(f"{file_name} "f"completed successfully")
-
+                future.result()
             except Exception as e:
-                logger.error(f"Error processing "f"{file_name}")
-                logger.error(str(e))
-                raise
+                print(f"Job failed: {e}")
 
-        logger.info("BGL Processing Completed")
 
-    except Exception as e:
+#     BASE_HDFS = get_hdfs_base()
+#     spark = create_spark_session("CBS - Bulk Data PIPELINE", BASE_HDFS)
+#     today = get_etl_date(spark)
+#     posting_date_str = today.strftime("%d-%m-%Y")
+#     dates = [posting_date_str, posting_date_str]
 
-        if logger:
-            logger.error(str(e))
-        raise
+    #   dates = ["01-06-2026","01-06-2026"] 
+#     for etl_date in dates:
+        
+#         types = ["INV","BOR","GLCCGEN","GLCCCTA","GLCCINV"]
+#         # types = ["BOR"]
+#         for type in types:
+#             process(type,spark,BASE_HDFS,etl_date) 
 
-    finally:
-        try:
-            spark.stop()
-        except:
-            pass
