@@ -2,6 +2,8 @@
 import re
 import sys
 import os
+from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base
 from datetime import datetime, timedelta
 from py4j.java_gateway import java_import
 from pyspark.sql.functions import col, split, substring, concat, regexp_replace, when, length
@@ -12,8 +14,8 @@ from common.processRun import get_run_id
 # from common.#log_etl_modified import #log_etl
 from common.constants import Process
 from common.logger import setup_logger
-from common.fileUtil import get_hdfs_base
-from common.createSpark import create_spark_session
+
+
 from common.create_path_if_not_exists import create_path_if_not_exists
 from pathlib import Path
 from common.read_write_oracle import read_oracle, write_oracle
@@ -121,10 +123,10 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
                 datetime.strptime(folder_name,"%d-%m-%Y")
             except:
                 continue
-            misc_path = spark._jvm.Path(folder.getPath().toString() + "/misc")
-            if not fs.exists(misc_path):
+            # misc_path = spark._jvm.Path(folder.getPath().toString() + "/misc")
+            if not fs.exists(base_path):
                 continue
-            files = fs.listStatus(misc_path)
+            files = fs.listStatus(base_path)
 
             for file_status in files:
                 file_name = file_status.getPath().getName()
@@ -144,9 +146,9 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
         current_date = start_date
         while current_date <= end_date:
             folder_date = current_date.strftime("%d-%m-%Y")
-            misc_path = (f"{bgl_base_path}/"f"{folder_date}/misc")
-            logger.info(f"Checking misc path : "f"{misc_path}")
-            misc_path_obj = spark._jvm.Path(misc_path)
+            # misc_path = (f"{bgl_base_path}/"f"{folder_date}/misc")
+            logger.info(f"Checking misc path : "f"{base_path}")
+            misc_path_obj = spark._jvm.Path(base_path)
 
             if not fs.exists(misc_path_obj):
                 logger.info(f"misc folder not found "f"for {folder_date}")
@@ -208,7 +210,10 @@ if __name__ == "__main__":
 
         # # to add this type "bgl" in paths_for_read function==== done
         output_path =  f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/MISC/"
+        
         print(f"==================={year}============{month}==============={day}===============> is the date")
+        print(f"HDFS_BASE: {HDFS_BASE}")
+        print(f"Final Path: {output_path}")
         res = create_path_if_not_exists(spark,output_path)   
         print(res)
         print("=================================Path created for saving data in datalake=================================")
@@ -272,7 +277,7 @@ if __name__ == "__main__":
                 # READ FILE
                 # ==================================
 
-                file_df = spark.read.text(input_path)
+                file_df = spark.read.text(   )
                 logger.info("File read successfully")
 
                 # ==================================
