@@ -24,35 +24,35 @@ from common.read_write_oracle import read_oracle, write_oracle
 # ==========================================================
 # MANIFEST CREATION
 # ==========================================================
-def create_manifest(spark, BASE_MANIFEST_PATH, RUN_ID, process_run_id, logger):
-    try:
-        etl_date_path = get_etl_date(spark).strftime("%Y%m%d")
-        hdfs_dir = f"{BASE_MANIFEST_PATH}/{etl_date_path}"
-        java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-        java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-        fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
+# def create_manifest(spark, BASE_MANIFEST_PATH, RUN_ID, process_run_id, logger):
+#     try:
+#         etl_date_path = get_etl_date(spark).strftime("%Y%m%d")
+#         hdfs_dir = f"{BASE_MANIFEST_PATH}/{etl_date_path}"
+#         java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
+#         java_import(spark._jvm, "org.apache.hadoop.fs.Path")
+#         fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
 
-        manifest_filename = (f"BGL_successful_{RUN_ID}_Manifest.txt")
-        dest_file_path = spark._jvm.Path(f"{hdfs_dir}/{manifest_filename}")
+#         manifest_filename = (f"BGL_successful_{RUN_ID}_Manifest.txt")
+#         dest_file_path = spark._jvm.Path(f"{hdfs_dir}/{manifest_filename}")
 
-        # #log_etl(spark,process_run_id,"bgl_manifest_writing",1,"Starting manifest stage.")
+#         # #log_etl(spark,process_run_id,"bgl_manifest_writing",1,"Starting manifest stage.")
 
-        hdfs_dir_obj = spark._jvm.Path(hdfs_dir)
+#         hdfs_dir_obj = spark._jvm.Path(hdfs_dir)
 
-        if not fs.exists(hdfs_dir_obj):
-            fs.mkdirs(hdfs_dir_obj)
+#         if not fs.exists(hdfs_dir_obj):
+#             fs.mkdirs(hdfs_dir_obj)
 
-        out_stream = fs.create(dest_file_path, True)
-        out_stream.write(bytearray("BGL successfully loaded","utf-8"))
-        out_stream.close()
+#         out_stream = fs.create(dest_file_path, True)
+#         out_stream.write(bytearray("BGL successfully loaded","utf-8"))
+#         out_stream.close()
 
-        logger.info(f"Manifest written to HDFS : {dest_file_path}")
-        #log_etl(spark,process_run_id,"bgl_manifest_writing",2,"Manifest uploaded successfully.")
+#         #logger.info(f"Manifest written to HDFS : {dest_file_path}")
+#         #log_etl(spark,process_run_id,"bgl_manifest_writing",2,"Manifest uploaded successfully.")
 
-    except Exception as e:
-        logger.error(f"Error in manifest creation : {e}")
-        #log_etl(spark,process_run_id,"bgl_manifest_writing",3,"Error in creating manifest file")
-        raise
+#     except Exception as e:
+#         logger.error(f"Error in manifest creation : {e}")
+#         #log_etl(spark,process_run_id,"bgl_manifest_writing",3,"Error in creating manifest file")
+#         raise
     
 
 def get_last_processed_date(spark):
@@ -67,7 +67,7 @@ def get_last_processed_date(spark):
         WHERE STATUS='PROCESSED'
     )
     """
-    tracker_df = read_oracle(spark=spark,table=query)
+    tracker_df = read_oracle(spark,query)
     row = tracker_df.collect()[0]
     return row["LAST_PROCESSED_DATE"]
 
@@ -108,11 +108,11 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
     # FIRST RUN
     #===============================================================================
     if start_date is None:
-        logger.info(f"Tracker empty. Performing first time full scan.")
+        #logger.info(f"Tracker empty. Performing first time full scan.")
         base_path = spark._jvm.Path(bgl_base_path)
     
         if not fs.exists(base_path):
-            logger.info(f"{bgl_base_path} not found.")
+            #logger.info(f"{bgl_base_path} not found.")
             return discovered_files
         date_folders = fs.listStatus(base_path)
         for folder in date_folders:
@@ -134,7 +134,7 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
                     continue
                 match = re.search(r"BGL_Ext_(\d{8})",file_name)
                 if not match:
-                    logger.info(f"Unable to extract date from {file_name}")
+                    #logger.info(f"Unable to extract date from {file_name}")
                     continue
                 file_date = datetime.strptime(match.group(1),"%d-%m-%Y").date()
                 discovered_files.append({"file_path":file_status.getPath().toString(),"file_name":file_name,"file_date":file_date})
@@ -147,11 +147,11 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
         while current_date <= end_date:
             folder_date = current_date.strftime("%d-%m-%Y")
             # misc_path = (f"{bgl_base_path}/"f"{folder_date}/misc")
-            logger.info(f"Checking misc path : "f"{base_path}")
-            misc_path_obj = spark._jvm.Path(base_path)
+            #logger.info(f"Checking misc path : "f"{base_path}")
+            misc_path_obj = spark._jvm.Path( )
 
             if not fs.exists(misc_path_obj):
-                logger.info(f"misc folder not found "f"for {folder_date}")
+                #logger.info(f"misc folder not found "f"for {folder_date}")
                 print("====================================no misc folder found===============================")
                 current_date += timedelta(days=1)
                 continue
@@ -163,13 +163,13 @@ def discover_bgl_files(spark,start_date,end_date,logger,bgl_base_path):
                     continue
                 match = re.search(r"BGL_Ext_(\d{8})",file_name)
                 if not match:
-                    logger.info(f"Unable to extract date from {file_name}")
+                    #logger.info(f"Unable to extract date from {file_name}")
                     continue
                 file_date = datetime.strptime(match.group(1),"%d-%m-%Y").date()
                 discovered_files.append({"file_path":file_status.getPath().toString(),"file_name":file_name,"file_date":file_date})
             current_date += timedelta(days=1)
 
-        logger.info(f"Total BGL files discovered : "f"{len(discovered_files)}")
+        #logger.info(f"Total BGL files discovered : "f"{len(discovered_files)}")
         return discovered_files
 
             
@@ -200,29 +200,29 @@ if __name__ == "__main__":
         # )
         # run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
         # logger = setup_logger("BGL", run_id, posting_date_str)
-        # logger.info("========== BGL PIPELINE STARTED ==========")
+        # #logger.info("========== BGL PIPELINE STARTED ==========")
 
-        date_str = posting_date_str
-        date_obj = datetime.strptime(date_str, "%d-%m-%Y")    
-        year = date_obj.strftime("%Y")
-        month = date_obj.strftime("%b").upper()
-        day = date_obj.strftime("%d")
+        # date_str = posting_date_str
+        # date_obj = datetime.strptime(date_str, "%d-%m-%Y")    
+        # year = date_obj.strftime("%Y")
+        # month = date_obj.strftime("%b").upper()
+        # day = date_obj.strftime("%d")
 
         # # to add this type "bgl" in paths_for_read function==== done
-        output_path =  f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/MISC/"
+        output_path =  f"{HDFS_BASE}/druid-data-lake/2026/APR/03/MISC"
         
-        print(f"==================={year}============{month}==============={day}===============> is the date")
-        print(f"HDFS_BASE: {HDFS_BASE}")
-        print(f"Final Path: {output_path}")
-        res = create_path_if_not_exists(spark,output_path)   
-        print(res)
-        print("=================================Path created for saving data in datalake=================================")
-        logger.info(f"DELTA_PATH : {res}")
-        # hdfs_paths = paths_for_read("bgl", today, posting_date_str)
-        manifest_base=f"{HDFS_BASE}/ManifestFolder"
-        bgl_manifest=create_path_if_not_exists(spark,manifest_base)
-        print("=================================Path created for manifest=================================")
-        logger.info(f"MANIFEST_FILE_PATH : {bgl_manifest}")
+        # print(f"==================={year}============{month}==============={day}===============> is the date")
+        # print(f"HDFS_BASE: {HDFS_BASE}")
+        # print(f"Final Path: {output_path}")
+        # res = create_path_if_not_exists(spark,output_path)   
+        # print(res)
+        # print("=================================Path created for saving data in datalake=================================")
+        # #logger.info(f"DELTA_PATH : {res}")
+        # # hdfs_paths = paths_for_read("bgl", today, posting_date_str)
+        # manifest_base=f"{HDFS_BASE}/ManifestFolder"
+        # bgl_manifest=create_path_if_not_exists(spark,manifest_base)
+        # print("=================================Path created for manifest=================================")
+        # #logger.info(f"MANIFEST_FILE_PATH : {bgl_manifest}")
 
         # HDFS_PATH = hdfs_paths["HDFS_PATH"]
         # BGL_DATALAKE_PATH = hdfs_paths["BGL_DATALAKE_PATH"]
@@ -234,7 +234,7 @@ if __name__ == "__main__":
         # ==========================================
 
         last_processed_date = get_last_processed_date(spark)
-        logger.info(f"Last Processed Date : "f"{last_processed_date}")
+        #logger.info(f"Last Processed Date : "f"{last_processed_date}")
         if last_processed_date is None:
             start_date = None
         else:
@@ -246,7 +246,7 @@ if __name__ == "__main__":
         # bgl_base_path=f"{HDFS_BASE}/CBS-FILES/{today_str}/misc"
         # input_path = "file:///Scripts/BGL_Ext_12052026_234901.txt"
         bgl_files = discover_bgl_files(spark=spark,start_date=start_date,end_date=today,logger=logger,bgl_base_path=f"{HDFS_BASE}/CBS-FILES/08-05-2026/misc")
-        logger.info(f"Total files discovered : "f"{len(bgl_files)}")
+        #logger.info(f"Total files discovered : "f"{len(bgl_files)}")
         print("======================================files discovered=========================================")
         # ==========================================
         # PROCESS FILES
@@ -258,17 +258,14 @@ if __name__ == "__main__":
             file_name = file_info["file_name"]
             file_date = file_info["file_date"]
 
-            logger.info(
-                f"Processing file : "
-                f"{file_name}"
-            )
+            #logger.info(f"Processing file : "f"{file_name}")
 
             # ======================================
             # SKIP IF ALREADY PROCESSED
             # ======================================
 
             if is_processed(spark,file_name):
-                logger.info(f"{file_name} already processed")
+                #logger.info(f"{file_name} already processed")
                 continue
 
             try:
@@ -277,8 +274,8 @@ if __name__ == "__main__":
                 # READ FILE
                 # ==================================
 
-                file_df = spark.read.text(   )
-                logger.info("File read successfully")
+                file_df = spark.read.text(input_path)
+                #logger.info("File read successfully")
 
                 # ==================================
                 # CLEAN DATA
@@ -304,27 +301,27 @@ if __name__ == "__main__":
                         .otherwise(regexp_replace(parts.getItem(7),"^0+","")).alias("STATUS")
                 )
                 parsed_df.show(200, False)
-                logger.info("Parsed DF created")
+                #logger.info("Parsed DF created")
                 # row_count = (parsed_df.count())
-                # logger.info(f"Rows : {row_count}")
+                # #logger.info(f"Rows : {row_count}")
 
                 # ==================================
                 # DELTA WRITE
                 # ==================================
 
-                # parsed_df.write \
-                #     .format("delta") \
-                #     .mode("append") \
-                #     .save(res)
+                parsed_df.write \
+                    .format("delta") \
+                    .mode("append") \
+                    .save(output_path)
 
-                logger.info("Delta write completed")
+                #logger.info("Delta write completed")
                 print("=====================Delta write completed===================")
 
                 # ==================================
                 # MANIFEST
                 # ==================================
 
-                create_manifest(spark=spark,BASE_MANIFEST_PATH=bgl_manifest,RUN_ID=run_id,process_run_id=    process_run_id,logger=logger)
+                # create_manifest(spark=spark,BASE_MANIFEST_PATH=bgl_manifest,RUN_ID=run_id,process_run_id=    process_run_id,logger=logger)
 
                 # ==================================
                 # INSERT TRACKER RECORD
@@ -334,14 +331,14 @@ if __name__ == "__main__":
 
                 write_oracle(tracker_df,"BGL_FILE_TRACKER")
                 print("=================================oracle write completed=================================")
-                logger.info(f"{file_name} "f"completed successfully")
+                #logger.info(f"{file_name} "f"completed successfully")
 
             except Exception as e:
                 logger.error(f"Error processing "f"{file_name}")
                 logger.error(str(e))
                 raise
 
-        logger.info("BGL Processing Completed")
+        #logger.info("BGL Processing Completed")
 
     except Exception as e:
 
