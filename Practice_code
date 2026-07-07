@@ -1,12 +1,19 @@
-# BGL PIPELINE
-
 import re
 import sys
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from py4j.java_gateway import java_import
-from pyspark.sql.functions import col,split,substring,concat,regexp_replace,when,length
+from pyspark.sql.functions import (
+    col,
+    split,
+    substring,
+    concat,
+    regexp_replace,
+    when,
+    length
+)
+
 from common.createSpark import create_spark_session
 from common.fileUtil import get_hdfs_base
 from common.fileUtil import paths_for_read
@@ -32,11 +39,14 @@ def get_last_processed_date(spark):
         WHERE STATUS='PROCESSED'
     )
     """
+
     print("===========================Before oracle read==========================")
     tracker_df = read_oracle(spark, query)
     print("===========================After oracle read==========================")
+
     row = tracker_df.collect()[0]
     print("===========================After collect==========================")
+
     return row["LAST_PROCESSED_DATE"]
 
 
@@ -61,12 +71,16 @@ def is_processed(spark, file_name):
 
 
 # ==========================================================
-# ETL DATE
+# MAIN PIPELINE
 # ==========================================================
+
 try:
+
     PROCESS_ID = Process.BGL
     HDFS_BASE = get_hdfs_base()
-    print(f"HDFS_BASE: {HDFS_BASE}")
+
+    print(f"HDFS_BASE : {HDFS_BASE}")
+
     spark = create_spark_session("BGL_PIPELINE", HDFS_BASE)
 
     today = get_etl_date(spark)
@@ -74,167 +88,87 @@ try:
     today_str = posting_date_str
 
     process_run_id = (
-        sys.argv[1] if len(sys.argv) > 1
+        sys.argv[1]
+        if len(sys.argv) > 1
         else get_process_run_id(spark, PROCESS_ID, posting_date_str)
     )
-    run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
-    logger = setup_logger("BGL", run_id, posting_date_str)
-    logger.info("========== BGL PIPELINE STARTED ==========")
 
+    run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
+
+    logger = setup_logger("BGL", run_id, posting_date_str)
+
+    logger.info("====================================================")
+    logger.info("BGL Pipeline Started")
+    logger.info("====================================================")
+
+    logger.info(f"Process ID            : {PROCESS_ID}")
+    logger.info(f"Process Run ID        : {process_run_id}")
+    logger.info(f"Run ID                : {run_id}")
+    logger.info(f"HDFS Base Path        : {HDFS_BASE}")
+
+    # ==========================================================
+    # GET LAST PROCESSED DATE
+    # ==========================================================
+
+    logger.info("Fetching Last Processed Date from BGL_FILE_TRACKER.")
 
     last_processed_date = get_last_processed_date(spark)
-    logger.info(f"Last Processed Date : "f"{last_processed_date}")
+
+    logger.info(f"ETL Date              : {today}")
+    logger.info(f"Last Processed Date   : {last_processed_date}")
+
+    # ==========================================================
+    # DETERMINE DATE RANGE
+    # ==========================================================
 
     if last_processed_date is None:
+        logger.info(
+            "No previously processed records found. "
+            "Pipeline will start from the ETL Date."
+        )
         from_date = today
     else:
         from_date = last_processed_date + timedelta(days=1)
-    
+
     to_date = today
-    
-    print(f"FROM DATE : {from_date}")
-    print(f"TO DATE   : {to_date}")
-   
-    
+
+    logger.info(f"From Date             : {from_date}")
+    logger.info(f"To Date               : {to_date}")
+
     # ==========================================================
-    # HDFS
+    # VALIDATE ETL DATE
     # ==========================================================
-    
+
+    if last_processed_date is not None and today <= last_processed_date:
+
+        logger.error(
+            f"Invalid ETL Date. ETL Date ({today}) must be greater than "
+            f"the Last Processed Date ({last_processed_date})."
+        )
+
+        logger.error(
+            "ETL Date should always be ahead of the Last Processed Date. "
+            "Pipeline execution cannot continue."
+        )
+
+        raise Exception(
+            "ETL Date should always be ahead of the Last Processed Date."
+        )
+
+    logger.info("Date validation completed successfully.")
+    logger.info(
+        f"Pipeline will process files from {from_date} to {to_date}."
+    )
+
+    # ==========================================================
+    # HDFS INITIALIZATION
+    # ==========================================================
+
     java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
     java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
+
+    fs = spark._jvm.FileSystem.get(
+        spark._jsc.hadoopConfiguration()
+    )
 
     current_date = from_date
-    
-    while current_date <= to_date:
-        folder_date = current_date.strftime("%d-%m-%Y")
-        input_folder = f"{HDFS_BASE}/CBS-FILES/{folder_date}/misc"
-    
-        # print(f"\nChecking folder : {input_folder}")
-        logger.info(f"\nChecking folder : {input_folder}")
-        path = spark._jvm.Path(input_folder)
-    
-        # ======================================================
-        # FOLDER NOT PRESENT
-        # ======================================================
-        if not fs.exists(path):
-            print(f"{folder_date} folder not present.")
-            tracker_df = spark.createDataFrame([("", current_date, "FILE_NOT_PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
-            write_oracle(tracker_df, "BGL_FILE_TRACKER")
-            current_date += timedelta(days=1)
-            continue
-    
-        # ======================================================
-        # GET FILES
-        # ======================================================
-        files = fs.listStatus(path)
-        print(f"Files found : {len(files)}")
-        # ======================================================
-        # DATALAKE PATH
-        # ======================================================
-        year = current_date.strftime("%Y")
-        month = current_date.strftime("%b").upper()
-        day = current_date.strftime("%d")
-    
-        output_path = (f"{HDFS_BASE}/druid-data-lake/"f"{year}/{month}/{day}/MISC")
-        create_path_if_not_exists(spark, output_path)
-    
-        # ======================================================
-        # LOOP THROUGH FILES
-        # ======================================================
-        for file_status in files:
-            # if file_status.isDirectory():
-            #     continue
-    
-            file_name = file_status.getPath().getName()
-    
-            if not file_name.startswith("BGL_Ext_"):
-                continue
-    
-            input_path = file_status.getPath().toString()
-    
-            print(f"Processing : {file_name}")
-    
-            if is_processed(spark, file_name):
-                print(f"{file_name} already processed.")
-                continue
-    
-            try:
-                # ==================================================
-                # READ FILE
-                # ==================================================
-    
-                file_df = spark.read.format("text").load(input_path)
-                # file_df.show(20, False)
-                parts = split(col("value"), r"\|")
-    
-                # ==================================================
-                # PARSE FILE
-                # ==================================================
-    
-                parsed_df = file_df.select(
-                    concat(substring(parts.getItem(0), 8, 7),parts.getItem(1)).alias("ACCOUNT_NO"),
-                    parts.getItem(1).alias("BRANCH_CODE"),
-                    parts.getItem(2).alias("PRODUCT"),
-                    parts.getItem(3).alias("SEGMENT"),
-                    parts.getItem(4).alias("AMOUNT"),
-                    parts.getItem(5).alias("GLCC"),
-                    parts.getItem(6).alias("ACCOUNT_NAME"),
-                    when(regexp_replace(parts.getItem(7), "^0+", "") == "","0").otherwise(regexp_replace(parts.getItem(7), "^0+", "")).alias("STATUS")
-                )
-                l = parsed_df.count()
-                print(f"Rows Found :{l} ")
-                # parsed_df.show(200, False)
-    
-                # ==================================================
-                # WRITE TO DELTA
-                # ==================================================
-    
-                parsed_df.write \
-                    .format("delta") \
-                    .mode("append") \
-                    .save(output_path)
-    
-                print(f"{file_name} written successfully.")
-    
-                # ==================================================
-                # UPDATE TRACKER TABLE
-                # ==================================================
-    
-                tracker_df = spark.createDataFrame([(file_name,current_date,"PROCESSED",l)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-                print(f"{file_name} tracker updated.")
-    
-    
-            except Exception as e:
-
-                print(f"Error processing {file_name}")
-                print(str(e))
-
-                tracker_df = spark.createDataFrame([(file_name,current_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-
-        # ======================================================
-        # MOVE TO NEXT DATE
-        # ======================================================
-        current_date += timedelta(days=1)
-
-        print("==========================================")
-        print("BGL Processing Completed Successfully")
-        print("==========================================")
-    
-except Exception as e:
-    print("Pipeline Failed")
-    print(str(e))
-    raise
-
-finally:
-
-    try:
-        spark.stop()
-    except:
-        pass
-
-
-
-
