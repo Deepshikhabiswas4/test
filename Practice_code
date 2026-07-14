@@ -1,102 +1,109 @@
+from datetime import timedelta
 from pyspark.sql.functions import col, concat_ws
-# import logging
-import traceback
-import sys
-from common.fileUtil import get_hdfs_base  
-from common.createSpark import create_spark_session
-from common.read_write_oracle import read_oracle
-from common.fileUtil import tables_to_read
-from common.dateUtil import get_etl_date
-from common.create_path_if_not_exists import create_path_if_not_exists
 
-# logger = logging.getLogger(__name__)
+
+def check_previous_month_end(etl_date):
+    first_day_current_month = etl_date.replace(day=1)
+    return first_day_current_month - timedelta(days=1)
 
 
 def generate_reverse_provision_report(spark):
 
-    print("=================Reverse Provision Report Generation Started")
+    print("=================Reverse Provision Report Generation Started=================")
 
-    report_date = get_etl_date(spark).strftime("%d-%m-%Y")
+    etl_date = get_etl_date(spark)
+    report_date = etl_date.strftime("%Y-%m-%d")
 
-    # ------------------------------------------------------------------
-    # Fetch Reverse Provision CGLs
-    # ------------------------------------------------------------------
+    previous_month_end = check_previous_month_end(etl_date)
+    previous_month_end_str = previous_month_end.strftime("%Y-%m-%d")
+
     oracle_tables = tables_to_read("glif")
     TRANSACTIONS = oracle_tables["TRANSACTIONS"]
     BALANCE = oracle_tables["BALANCE"]
-    
-    reverse_query = f"""
-    (
-            SELECT DISTINCT CGL
-            FROM {TRANSACTIONS}
-            WHERE SOURCE_FLAG = 'R'
-            AND TRANSACTION_DATE = TO_DATE('{report_date}','yyyy-mm-dd')
-    )T1
-    """
-    try:
-        print(f"===========================Reading oracle query========================")
-        reverse_cgl_df = read_oracle(spark, reverse_query)
-    except Exception as e:
-        print(str(e))
-        spark.stop()
-        sys.exit()
-
-    
-    print(f"===========================Read oracle query========================")
-    # try:
-
-    #     count = reverse_cgl_df.count()
-    
-    #     print(f"===========================Reverse Provision CGL Count : {count} ")
-    # except Exception as e:
-    #     print(f"===========================Count Issue===================== ")
-    #     print(str(e))
-    #     spark.stop()
-    #     sys.exit()
 
     # ------------------------------------------------------------------
-    # Fetch Final GL Balance
+    # Read Previous Month Provisioned CGLs
+    # ------------------------------------------------------------------
+
+    reverse_query = f"""
+    (
+        SELECT DISTINCT CGL
+        FROM {TRANSACTIONS}
+        WHERE SOURCE_FLAG = 'V'
+          AND TRANSACTION_DATE = TO_DATE('{previous_month_end_str}','yyyy-mm-dd')
+    ) T1
+    """
+
+    print("================Reading Previous Month Provisioned CGLs================")
+
+    reverse_cgl_df = read_oracle(spark, reverse_query)
+
+    print(f"Provisioned CGL Count : {reverse_cgl_df.count()}")
+
+    # ------------------------------------------------------------------
+    # Read Today's GL Balance
     # ------------------------------------------------------------------
 
     gl_query = f"""
-        SELECT BRANCH, CURRENCY, CGL, BALANCE, INR_BALANCE
+    (
+        SELECT
+            BRANCH,
+            CURRENCY,
+            CGL,
+            BALANCE,
+            INR_BALANCE
         FROM {BALANCE}
         WHERE BALANCE_DATE = TO_DATE('{report_date}','yyyy-mm-dd')
+    ) T2
     """
 
+    print("================Reading GL Balance================")
+
     gl_balance_df = read_oracle(spark, gl_query)
-    #  {gl_balance_df.count()}
-    print(f"=======================GL Balance Count :")
+
+    print(f"GL Balance Count : {gl_balance_df.count()}")
 
     # ------------------------------------------------------------------
-    # Prepare Report
+    # Generate Report
     # ------------------------------------------------------------------
-    report_df = (gl_balance_df.alias("g").join(reverse_cgl_df.alias("r"),col("g.CGL") == col("r.CGL"),"inner")
+
+    report_df = (
+        gl_balance_df
+        .join(reverse_cgl_df, "CGL", "inner")
         .select(
-            col("g.BRANCH"),
-            col("g.CURRENCY"),
-            col("g.CGL"),
-            col("g.BALANCE"),
-            col("g.INR_BALANCE")
+            "BRANCH",
+            "CURRENCY",
+            "CGL",
+            "BALANCE",
+            "INR_BALANCE"
         )
         .orderBy("CGL", "BRANCH")
     )
 
-    print(f"===============================Report Record Count : {report_df.count()}==============")
+    print(f"Report Record Count : {report_df.count()}")
 
     # ------------------------------------------------------------------
-    # Convert to Pipe Separated Format
+    # Convert to Pipe Separated
     # ------------------------------------------------------------------
 
-    report_txt_df = report_df.select(concat_ws("|",col("BRANCH"),col("CURRENCY"),col("CGL"),col("BALANCE"),col("INR_BALANCE")).alias("value"))
+    report_txt_df = report_df.select(
+        concat_ws(
+            "|",
+            col("BRANCH"),
+            col("CURRENCY"),
+            col("CGL"),
+            col("BALANCE"),
+            col("INR_BALANCE")
+        ).alias("value")
+    )
 
     # ------------------------------------------------------------------
     # Write Report
     # ------------------------------------------------------------------
 
-    output_path = (f"{HDFS_BASE}/druid-data-lake/reports/reverse_provision/{report_date}")
+    output_path = f"{HDFS_BASE}/druid-data-lake/reports/reverse_provision/{report_date}"
+
     create_path_if_not_exists(spark, output_path)
-    print("=====================================path created for saving reports=================================")
 
     (
         report_txt_df
@@ -106,25 +113,4 @@ def generate_reverse_provision_report(spark):
         .text(output_path)
     )
 
-    print("=====================================Reverse Provision Report Generated Successfully===============")
-
-
-if __name__ == "__main__":
-
-    try:
-
-        HDFS_BASE = get_hdfs_base()
-        spark = create_spark_session("REPORT", HDFS_BASE)
-
-        generate_reverse_provision_report(spark)
-
-        print("============================Reverse Provision Report Completed Successfully")
-
-    except Exception as e:
-
-        print("=======================================Reverse Provision Report Failed============================================")
-        print(traceback.format_exc())
-        sys.exit(1)
-
-    finally:
-        spark.stop()
+    print("================Reverse Provision Report Generated Successfully================")
