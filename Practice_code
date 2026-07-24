@@ -1,143 +1,167 @@
-from pyspark.sql.functions import col, concat_ws
-# import logging
-import traceback
-import sys
-from common.fileUtil import get_hdfs_base  
-from common.createSpark import create_spark_session
-from common.read_write_oracle import read_oracle
-from common.fileUtil import tables_to_read
-from common.dateUtil import get_etl_date
-from common.create_path_if_not_exists import create_path_if_not_exists
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>4.1.0</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.tcs.fincore</groupId>
+	<artifactId>AsciiGenerationService</artifactId>
+	<version>0.0.1</version>
+	<name>ascii-generation-service</name>
+	<description>Ascii Generation Service</description>
+	<url/>
+	<licenses>
+		<license/>
+	</licenses>
+	<developers>
+		<developer/>	</developers>
+	<scm>
+		<connection/>
+		<developerConnection/>
+		<tag/>
+		<url/>
+	</scm>
+	<properties>
+		<java.version>21</java.version>
+	</properties>
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
 
-# logger = logging.getLogger(__name__)
+		<dependency>
+			<groupId>com.oracle.database.jdbc</groupId>
+			<artifactId>ojdbc11</artifactId>
+<!--			<scope>runtime</scope>-->
+		</dependency>
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+            <version>1.18.42</version>
 
+			<optional>true</optional>
+		</dependency>
+		
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
 
-def generate_reverse_provision_report(spark):
+		<dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client</artifactId>
+            <version>3.4.3</version> <exclusions>
+            <exclusion>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-reload4j</artifactId>
+            </exclusion>
+            <exclusion>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-log4j12</artifactId>
+            </exclusion>
+            <exclusion>
+                <groupId>log4j</groupId>
+                <artifactId>log4j</artifactId>
+            </exclusion>
+            <exclusion>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+            </exclusion>
+        </exclusions>
+    	</dependency>
 
-    print("=========Reverse Provision Report Generation Started================")
+		<dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
 
-    etl_date = get_etl_date(spark)
-    report_date = etl_date.strftime("%Y-%m-%d")
+		<dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-devtools</artifactId>
+            <scope>runtime</scope>
+            <optional>true</optional>
+        </dependency>
 
-    # ------------------------------------------------------------------
-    # Fetching reverse provision CGLs
-    # ------------------------------------------------------------------
-    oracle_tables = tables_to_read("glif")
-    TRANSACTIONS = oracle_tables["TRANSACTIONS"]
-    BALANCE = oracle_tables["BALANCE"]
-    try:
+		<dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
 
-    
-        reverse_query = f"""
-        (
-                SELECT DISTINCT CGL
-                FROM {TRANSACTIONS}
-                WHERE SOURCE_FLAG = 'R'
-                AND TRANSACTION_DATE = TO_DATE('{report_date}','yyyy-mm-dd')
-        )T1
-        """
-        
-        print(f"======================Reading Previous Month Provisioned CGLs======================")
-        reverse_cgl_df = read_oracle(spark, reverse_query)
-        reverse_cgl_df.show(20, False)
-    
-        count = reverse_cgl_df.count()
-        print(f"======================Reverse Provision CGL Count : {count}=================")
-        
-        # ------------------------------------------------------------------
-        # Fetching final GL_BALANCE 
-        # ------------------------------------------------------------------
-
-        gl_query = f"""
-        (
-            SELECT BRANCH_CODE, CURRENCY, CGL, BALANCE, INR_BALANCE
-            FROM {BALANCE}
-            WHERE BALANCE_DATE = TO_DATE('{report_date}','yyyy-mm-dd')
-        ) T2
-        """
-
-        print(f"======================Reading Final GL BALANCE for report date======================")
-        gl_balance_df = read_oracle(spark, gl_query)
-        #  {gl_balance_df.count()}
-        gl_balance_df.show(20, False)
-        # print(f"=======================GL Balance Count :")
-
-        # ------------------------------------------------------------------
-        # Preparing report
-        # ------------------------------------------------------------------
-        print(f"=============Creating Report for Reverse Provisioned CGLs joining with Final GL BALANCE ===============")
-        report_df = (
-            gl_balance_df
-            .join(reverse_cgl_df, "CGL", "inner")
-            .select("BRANCH_CODE","CURRENCY","CGL","BALANCE","INR_BALANCE")
-            .orderBy("CGL", "BRANCH_CODE")
-        )
-        report_df.show(20, False)
-        report_count = report_df.count()
-        print(f"===============Report Record Count : {report_count}==============")
-
-        # ------------------------------------------------------------------
-        # Converting to Pipe Separated Format
-        # ------------------------------------------------------------------
-
-        report_txt_df = report_df.select(
-            concat_ws(
-                "|",
-                col("BRANCH_CODE"),
-                col("CURRENCY"),
-                col("CGL"),
-                col("BALANCE"),
-                col("INR_BALANCE")
-            ).alias("value")
-        )
-
-        report_txt_df.show(20, False)
-    except Exception as e:
-        print(f"=================errorrrrrrrr===================== ")
-        print(str(e))     
-        spark.stop()
-        sys.exit()
-
-
-    # ------------------------------------------------------------------
-    # Writing Report Add only non zero 
-    # ------------------------------------------------------------------
-    try:
-            
-        output_path = (f"{HDFS_BASE}/druid-data-lake/reports/reverse_provision/{report_date}")
-        create_path_if_not_exists(spark, output_path)
-        print(f"======================Datalake Path created for reports======================")
-
-        (
-            report_txt_df
-            .coalesce(1)
-            .write
-            .mode("overwrite")
-            .text(output_path)
-        )
-        print(f"===============Report written into Datalake======================")
-        print("================Reverse Provision Report Generated Successfully================")
-    except Exception as e:
-        print(f"=====================cant write report in text file in hdfs===================== ")
-        print(str(e))
-        spark.stop()
-        sys.exit()
+        <!-- Source: https://mvnrepository.com/artifact/com.google.guava/guava -->
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+            <version>33.0.0-jre</version>
+            <scope>compile</scope>
+        </dependency>
 
 
-if __name__ == "__main__":
+		 <!--Spring Kafka Support -->
+	<dependency>
+		<groupId>org.springframework.kafka</groupId>
+		<artifactId>spring-kafka</artifactId>
+	</dependency>
 
-    try:
+	 <!--Resilience4j for Circuit Breaker -->
+<!--	<dependency>-->
+<!--		<groupId>io.github.resilience4j</groupId>-->
+<!--		<artifactId>resilience4j-spring-boot3</artifactId>-->
+<!--		<version>2.2.0</version> -->
+<!--	</dependency>-->
 
-        HDFS_BASE = get_hdfs_base()
-        spark = create_spark_session("REPORT", HDFS_BASE)
+	  <!--Validation Support (for @Valid and Validator) -->
+	<dependency>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-validation</artifactId>
+	</dependency>
 
-        generate_reverse_provision_report(spark)
-        print("============================Reverse Provision Report Completed Successfully")
+	<dependency>
+    	<groupId>com.fasterxml.jackson.core</groupId>
+    	<artifactId>jackson-databind</artifactId>
+    </dependency>
 
-    except Exception as e:
-        print("=======================================Reverse Provision Report Failed============================================")
-        print(traceback.format_exc())
-        sys.exit(1)
+    </dependencies>
+	
 
-    finally:
-        spark.stop()
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<annotationProcessorPaths>
+						<path>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+                            <version>1.18.42</version>
+						</path>
+					</annotationProcessorPaths>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+                            <!-- <version>1.18.42</version> -->
+						</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>
