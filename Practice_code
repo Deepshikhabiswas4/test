@@ -6,7 +6,8 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from py4j.java_gateway import java_import
-from pyspark.sql.functions import col,split,substring,concat,regexp_replace,when,length
+from pyspark.sql.functions import col,split,substring,concat,regexp_replace,when,length,lit,count,substring
+from delta.tables import DeltaTable
 from common.createSpark import create_spark_session
 from common.fileUtil import get_hdfs_base
 from common.fileUtil import paths_for_read
@@ -75,50 +76,50 @@ try:
         else get_process_run_id(spark, PROCESS_ID, posting_date_str)
     )
     run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
-    logger = setup_logger("BGL", run_id, posting_date_str)
+    # logger = setup_logger("BGL", run_id, posting_date_str)
 
-    logger.info("====================================================")
-    logger.info("BGL Pipeline Started")
-    logger.info("====================================================")
+    print("====================================================")
+    print("BGL Pipeline Started")
+    print("====================================================")
     #log_etl(spark,process_run_id,"bgl_pipeline",1,"BGL pipeline started")
 
-    logger.info(f"Process ID            : {PROCESS_ID}")
-    logger.info(f"Process Run ID        : {process_run_id}")
-    logger.info(f"Run ID                : {run_id}")
-    logger.info(f"HDFS Base Path        : {HDFS_BASE}")
+    print(f"Process ID            : {PROCESS_ID}")
+    print(f"Process Run ID        : {process_run_id}")
+    print(f"Run ID                : {run_id}")
+    print(f"HDFS Base Path        : {HDFS_BASE}")
 
     # ==========================================================
     # GET LAST PROCESSED DATE
     # ==========================================================
-    logger.info("Fetching Last Processed Date from BGL_FILE_TRACKER.")
+    print("Fetching Last Processed Date from BGL_FILE_TRACKER.")
     last_processed_date = get_last_processed_date(spark)
-    logger.info(f"ETL Date              : {today}")
-    logger.info(f"Last Processed Date   : {last_processed_date}")
+    print(f"ETL Date              : {today}") #31st march
+    print(f"Last Processed Date   : {last_processed_date}") #none
 
     if last_processed_date is None:
-        logger.info(
+        print(
             "No previously processed records found. "
             "Pipeline will start from the ETL Date."
         )
-        from_date = today
+        from_date = today #31st march
     else:
         from_date = last_processed_date + timedelta(days=1)
     
-    to_date = today
+    to_date = today #31st march
     
-    logger.info(f"From Date             : {from_date}")
-    logger.info(f"To Date               : {to_date}")
+    print(f"From Date             : {from_date}") #31st march
+    print(f"To Date               : {to_date}") #31st march
 
     # ==========================================================
     # VALIDATE ETL DATE
     # ==========================================================
     if last_processed_date is not None and today <= last_processed_date:
-        logger.error(
+        print(
             f"Invalid ETL Date. ETL Date ({today}) must be greater than "
             f"the Last Processed Date ({last_processed_date})."
         )
 
-        logger.error(
+        print(
             "ETL Date should always be ahead of the Last Processed Date. "
             "Pipeline execution cannot continue."
         )
@@ -127,8 +128,8 @@ try:
             "ETL Date should always be ahead of the Last Processed Date."
         )
 
-    logger.info("Date validation completed successfully.")
-    logger.info(f"Pipeline will process files from {from_date} to {to_date}.")
+    print("Date validation completed successfully.")
+    print(f"Pipeline will process files from {from_date} to {to_date}.")
 
     # ==========================================================
     # HDFS
@@ -137,31 +138,35 @@ try:
     java_import(spark._jvm, "org.apache.hadoop.fs.Path")
     fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
 
-    current_date = from_date
+    current_date = from_date #31st march
     
-    while current_date <= to_date:
-        folder_date = current_date.strftime("%d-%m-%Y")
-        input_folder = f"{HDFS_BASE}/CBS-FILES/{folder_date}/misc"
+    while current_date <= to_date: #31st march <= 31st march
+        folder_date = current_date.strftime("%d-%m-%Y") #31st march
+        input_folder = f"{HDFS_BASE}/CBS-FILES/31-01-2026/misc"
+        
     
         # print(f"\nChecking folder : {input_folder}")
-        logger.info(f"\nChecking folder : {input_folder}")
+        print(f"\nChecking folder : {input_folder}")
         path = spark._jvm.Path(input_folder)
     
         # ======================================================
         # FOLDER NOT PRESENT
         # ======================================================
         if not fs.exists(path):
-            logger.warning(f"{folder_date} folder not present.")
+            print(f"{folder_date} folder not present.") #31st march
             tracker_df = spark.createDataFrame([("", current_date, "FILE_NOT_PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
-            write_oracle(tracker_df, "BGL_FILE_TRACKER")
-            current_date += timedelta(days=1)
+            tracker_df.show(20,False)
+            write_oracle(tracker_df, "BGL_FILE_TRACKER") #31st march
+            print("dsghfjesdfgkjewhglktfhwlekhgjnlkb")
+            current_date += timedelta(days=1) #1st april
+            print(current_date) #1st april
             continue
     
         # ======================================================
         # GET FILES
         # ======================================================
         files = fs.listStatus(path)
-        logger.info(f"Files found : {len(files)}")
+        print(f"Files found : {len(files)}")
 
         # ======================================================
         # DATALAKE PATH
@@ -170,8 +175,10 @@ try:
         month = current_date.strftime("%b").upper()
         day = current_date.strftime("%d")
     
-        output_path = (f"{HDFS_BASE}/druid-data-lake/"f"{year}/{month}/{day}/MISC")
+        output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/BANCS24/BGL")
+        summary_output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/PRODUCT_WISE/datalake")
         create_path_if_not_exists(spark, output_path)
+        create_path_if_not_exists(spark, summary_output_path)
     
         # ======================================================
         # LOOP THROUGH FILES
@@ -186,19 +193,20 @@ try:
     
             input_path = file_status.getPath().toString()
         
-            logger.info(f"Processing : {file_name}")
+            print(f"Processing : {file_name}")
     
             if is_processed(spark, file_name):
-                logger.info(f"{file_name} already processed.")
+                print(f"{file_name} already processed.")
                 continue
     
             try:
                 # ==================================================
                 # READ FILE
                 # ==================================================
-    
                 file_df = spark.read.format("text").load(input_path)
-                # file_df.show(20, False)
+                file_df.show(20, False)
+
+
                 parts = split(col("value"), r"\|")
     
                 # ==================================================
@@ -215,34 +223,73 @@ try:
                     parts.getItem(6).alias("ACCOUNT_NAME"),
                     when(regexp_replace(parts.getItem(7), "^0+", "") == "","0").otherwise(regexp_replace(parts.getItem(7), "^0+", "")).alias("STATUS")
                 )
+                parsed_df.cache()
                 l = parsed_df.count()
-                logger.info(f"Rows parsed from {file_name} :{l} ")
-                # parsed_df.show(200, False)
+                print(f"Rows parsed from {file_name} :{l} ")
+                
+                parsed_df.show(200, False)
     
                 # ==================================================
                 # WRITE TO DELTA
                 # ==================================================
     
-                parsed_df.write \
-                    .format("delta") \
-                    .mode("append") \
-                    .save(output_path)
+                # parsed_df.write \
+                #     .format("delta") \
+                #     .mode("append") \
+                #     .save(output_path)
     
-                logger.info(f"{file_name} written successfully.")
+                print(f"{file_name} written successfully.")
+                
+                type_name = file_name.split("_")[0].upper()
+                file_date = datetime.strptime(
+                    file_name.split("_")[2],
+                    "%d%m%Y").strftime("%Y-%m-%d")
+                
+                summary_df = (parsed_df.withColumn("CURRENCY",substring(col("GLCC"),6,3)).withClumn("CGL",substring(col("GLCC"),9,10)).withCloumn("TYPE",lit(type_name)).withColumn("FILE_DATE",lit(file_date)).groupBy("CURRENCY","CGL","PRODUCT","TYPE","FILE_DATE"))
+                print("Summary dataframe created.")
+                summary_df.show(200, False)
+
+                # summary_count = summary_df.count()
+                # print(f"Summary records created : {summary_count}")
+
+
+                # if DeltaTable.isDeltaTable(spark, summary_output_path):
+                #     print(f"Deleting existing {type_name} records for FILE_DATE {file_date}")
+                #     delta_table = DeltaTable.forPath(spark, summary_output_path)
+                #     delta_table.delete(f"TYPE = '{type_name}' AND FILE_DATE = '{file_date}'")
+                #     print("Existing summary records deleted successfully.")
+                if(run_id>1):
+                    print(f"Rerun detected (Run id: {run_id}). "
+                                f"Deleting existing {type_name} for {file_date}")
+                    delta_table = DeltaTable.forPath(spark, summary_output_path)
+                    delta_table.delete(f"TYPE = '{type_name}' AND FILE_DATE = '{file_date}'")
+                    print("Existing summary records deleted successfully.")
+
+
+                # summary_df.write \
+                #     .format("delta") \
+                #     .mode("append") \
+                #     .save(summary_output_path)
+                
+                print(f"Summary written successfully."
+                            f"{type_name} - {file_date}")
     
+
+
                 # ==================================================
                 # UPDATE TRACKER TABLE
                 # ==================================================
     
                 tracker_df = spark.createDataFrame([(file_name,current_date,"PROCESSED",l)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
                 write_oracle(tracker_df,"BGL_FILE_TRACKER")
-                logger.info(f"{file_name} tracker updated.")
+                print(f"{file_name} tracker updated.")
+            
     
     
             except Exception as e:
 
-                logger.info(f"Error processing {file_name}")
-                logger.exception("Exception occured while processing the file.")
+                print(f"Error processing {file_name}")
+                print("Exception occured while processing the file.")
 
                 tracker_df = spark.createDataFrame([(file_name,current_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
                 write_oracle(tracker_df,"BGL_FILE_TRACKER")
@@ -252,23 +299,23 @@ try:
         # ======================================================
         current_date += timedelta(days=1)
 
-    logger.info("==========================================")
-    logger.info("BGL Processing Completed Successfully")
-    logger.info("==========================================")
+    print("==========================================")
+    print("BGL Processing Completed Successfully")
+    print("==========================================")
     #log_etl(spark,process_run_id,"bgl_pipeline",2,f"BGL pipeline completed successfully.")
 
 except Exception as e:
     error_message = str(e)
-    logger.exception("BGL Pipeline Failed")
+    print("BGL Pipeline Failed")
     #log_etl(spark, process_run_id, "bgl_pipeline", 3, error_message)
     raise
 
 finally:
 
     try:
-        logger.info("Stopping Spark Session")
+        print("Stopping Spark Session")
         spark.stop()
-        logger.info("Stopped Spark Session")
+        print("Stopped Spark Session")
     except:
         pass
 
