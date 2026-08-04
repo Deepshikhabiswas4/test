@@ -1,324 +1,185 @@
-# BGL PIPELINE
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
 
-import re
-import sys
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-from py4j.java_gateway import java_import
-from pyspark.sql.functions import col,split,substring,concat,regexp_replace,when,length,lit,count,substring
-from delta.tables import DeltaTable
-from common.createSpark import create_spark_session
-from common.fileUtil import get_hdfs_base
-from common.fileUtil import paths_for_read
-from common.dateUtil import get_etl_date
-from common.processRun import get_process_run_id
-from common.processRun import get_run_id
-from common.constants import Process
-from common.logger import setup_logger
-# from common.log_etl_modified import log_etl
-from common.create_path_if_not_exists import create_path_if_not_exists
-from common.read_write_oracle import read_oracle, write_oracle
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.0</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
 
+    <groupId>com.tcs.fincore</groupId>
+    <artifactId>AsciiGenerationService</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>ascii-generation-service</name>
+    <description>Ascii Generation Service</description>
 
-# ==========================================================
-# GET LAST PROCESSED DATE
-# ==========================================================
-def get_last_processed_date(spark):
+    <properties>
+        <java.version>21</java.version>
+        <guava.version>33.0.0-jre</guava.version>
+        <hadoop.version>3.4.3</hadoop.version>
 
-    query = """
-    (
-        SELECT MAX(FILE_DATE) AS LAST_PROCESSED_DATE
-        FROM BGL_FILE_TRACKER
-        WHERE STATUS='PROCESSED'
-    )
-    """
-    # print("===========================Before oracle read==========================")
-    tracker_df = read_oracle(spark, query)
-    # print("===========================After oracle read==========================")
-    row = tracker_df.collect()[0]
-    return row["LAST_PROCESSED_DATE"]
+        <tomcat.version>11.0.23</tomcat.version>
+        <netty.version>4.2.16.Final</netty.version>
+        <bouncycastle.version>1.84</bouncycastle.version>
+    </properties>
+<!-- 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement> -->
 
+    <dependencies>
 
-# ==========================================================
-# CHECK IF FILE ALREADY PROCESSED
-# ==========================================================
+        <!-- Spring Boot Core Starters -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-data-jpa</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-actuator</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-validation</artifactId>
+            </dependency>
 
-def is_processed(spark, file_name):
+            <!-- <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency> -->
 
-    query = f"""
-    (
-        SELECT COUNT(*) CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_NAME='{file_name}'
-        AND STATUS='PROCESSED'
-    )
-    """
-    tracker_df = read_oracle(spark, query)
-    return tracker_df.collect()[0]["CNT"] > 0
+            <!-- Messaging & Utilities -->
+            <dependency>
+                <groupId>org.springframework.kafka</groupId>
+                <artifactId>spring-kafka</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>com.fasterxml.jackson.core</groupId>
+                <artifactId>jackson-databind</artifactId>
+            </dependency>
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>${guava.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
 
+            <!-- Database Driver -->
+            <dependency>
+                <groupId>com.oracle.database.jdbc</groupId>
+                <artifactId>ojdbc11</artifactId>
+            </dependency>
 
-# ==========================================================
-# MAIN_PIPELINE
-# ==========================================================
-try:
-    PROCESS_ID = Process.CBS_ALL_DATA
-    HDFS_BASE = get_hdfs_base()
-    print(f"HDFS_BASE: {HDFS_BASE}")
-    spark = create_spark_session("BGL_PIPELINE", HDFS_BASE)
+            <!-- Hadoop Client with Logging Exclusions -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-client</artifactId>
+                <version>${hadoop.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-reload4j</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-log4j12</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>log4j</groupId>
+                        <artifactId>log4j</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-classic</artifactId>
+                    </exclusion>
+                    <exclusion>
+                        <groupId>org.jline</groupId>
+                        <artifactId>jline</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>org.jline</groupId>
+                <artifactId>jline</artifactId>
+                <version>3.30.14</version>
+            </dependency>
 
-    today = get_etl_date(spark)
-    posting_date_str = today.strftime("%d-%m-%Y")
-    today_str = posting_date_str
+            <!-- Developer Tools & Boilerplate Reduction -->
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-devtools</artifactId>
+                <scope>runtime</scope>
+                <optional>true</optional>
+            </dependency>
 
-    process_run_id = (
-        sys.argv[1] if len(sys.argv) > 1
-        else get_process_run_id(spark, PROCESS_ID, posting_date_str)
-    )
-    run_id = get_run_id(spark, posting_date_str, PROCESS_ID)
-    # logger = setup_logger("BGL", run_id, posting_date_str)
-
-    print("====================================================")
-    print("BGL Pipeline Started")
-    print("====================================================")
-    #log_etl(spark,process_run_id,"bgl_pipeline",1,"BGL pipeline started")
-
-    print(f"Process ID            : {PROCESS_ID}")
-    print(f"Process Run ID        : {process_run_id}")
-    print(f"Run ID                : {run_id}")
-    print(f"HDFS Base Path        : {HDFS_BASE}")
-
-    # ==========================================================
-    # GET LAST PROCESSED DATE
-    # ==========================================================
-    print("Fetching Last Processed Date from BGL_FILE_TRACKER.")
-    last_processed_date = get_last_processed_date(spark)
-    print(f"ETL Date              : {today}") #31st march
-    print(f"Last Processed Date   : {last_processed_date}") #none
-
-    if last_processed_date is None:
-        print(
-            "No previously processed records found. "
-            "Pipeline will start from the ETL Date."
-        )
-        from_date = today #31st march
-    else:
-        from_date = last_processed_date + timedelta(days=1)
-    
-    to_date = today #31st march
-    
-    print(f"From Date             : {from_date}") #31st march
-    print(f"To Date               : {to_date}") #31st march
-
-    # ==========================================================
-    # VALIDATE ETL DATE
-    # ==========================================================
-    if last_processed_date is not None and today <= last_processed_date:
-        print(
-            f"Invalid ETL Date. ETL Date ({today}) must be greater than "
-            f"the Last Processed Date ({last_processed_date})."
-        )
-
-        print(
-            "ETL Date should always be ahead of the Last Processed Date. "
-            "Pipeline execution cannot continue."
-        )
-
-        raise Exception(
-            "ETL Date should always be ahead of the Last Processed Date."
-        )
-
-    print("Date validation completed successfully.")
-    print(f"Pipeline will process files from {from_date} to {to_date}.")
-
-    # ==========================================================
-    # HDFS
-    # ==========================================================  
-    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-
-    current_date = from_date #31st march
-    
-    while current_date <= to_date: #31st march <= 31st march
-        folder_date = current_date.strftime("%d-%m-%Y") #31st march
-        input_folder = f"{HDFS_BASE}/CBS-FILES/31-01-2026/misc"
-        
-    
-        # print(f"\nChecking folder : {input_folder}")
-        print(f"\nChecking folder : {input_folder}")
-        path = spark._jvm.Path(input_folder)
-    
-        # ======================================================
-        # FOLDER NOT PRESENT
-        # ======================================================
-        if not fs.exists(path):
-            print(f"{folder_date} folder not present.") #31st march
-            tracker_df = spark.createDataFrame([("", current_date, "FILE_NOT_PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
-            tracker_df.show(20,False)
-            write_oracle(tracker_df, "BGL_FILE_TRACKER") #31st march
-            print("dsghfjesdfgkjewhglktfhwlekhgjnlkb")
-            current_date += timedelta(days=1) #1st april
-            print(current_date) #1st april
-            continue
-    
-        # ======================================================
-        # GET FILES
-        # ======================================================
-        files = fs.listStatus(path)
-        print(f"Files found : {len(files)}")
-
-        # ======================================================
-        # DATALAKE PATH
-        # ======================================================
-        year = current_date.strftime("%Y")
-        month = current_date.strftime("%b").upper()
-        day = current_date.strftime("%d")
-    
-        output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/BANCS24/BGL")
-        summary_output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/PRODUCT_WISE/datalake")
-        create_path_if_not_exists(spark, output_path)
-        create_path_if_not_exists(spark, summary_output_path)
-    
-        # ======================================================
-        # LOOP THROUGH FILES
-        # ======================================================
-        for file_status in files:
-            if file_status.isDirectory():
-                continue
-    
-            file_name = file_status.getPath().getName()
-            if not file_name.startswith("BGL_Ext_"):
-                continue
-    
-            input_path = file_status.getPath().toString()
-        
-            print(f"Processing : {file_name}")
-    
-            if is_processed(spark, file_name):
-                print(f"{file_name} already processed.")
-                continue
-    
-            try:
-                # ==================================================
-                # READ FILE
-                # ==================================================
-                file_df = spark.read.format("text").load(input_path)
-                file_df.show(20, False)
+            <!-- Testing -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-test</artifactId>
+                <scope>test</scope>
+            </dependency>
 
 
-                parts = split(col("value"), r"\|")
-    
-                # ==================================================
-                # PARSE FILE
-                # ==================================================
-    
-                parsed_df = file_df.select(
-                    concat(substring(parts.getItem(0), 8, 7),parts.getItem(1)).alias("ACCOUNT_NO"),
-                    parts.getItem(1).alias("BRANCH_CODE"),
-                    parts.getItem(2).alias("PRODUCT"),
-                    parts.getItem(3).alias("SEGMENT"),
-                    parts.getItem(4).alias("AMOUNT"),
-                    parts.getItem(5).alias("GLCC"),
-                    parts.getItem(6).alias("ACCOUNT_NAME"),
-                    when(regexp_replace(parts.getItem(7), "^0+", "") == "","0").otherwise(regexp_replace(parts.getItem(7), "^0+", "")).alias("STATUS")
-                )
-                parsed_df.cache()
-                l = parsed_df.count()
-                print(f"Rows parsed from {file_name} :{l} ")
-                
-                parsed_df.show(200, False)
-    
-                # ==================================================
-                # WRITE TO DELTA
-                # ==================================================
-    
-                # parsed_df.write \
-                #     .format("delta") \
-                #     .mode("append") \
-                #     .save(output_path)
-    
-                print(f"{file_name} written successfully.")
-                
-                type_name = file_name.split("_")[0].upper()
-                file_date = datetime.strptime(
-                    file_name.split("_")[2],
-                    "%d%m%Y").strftime("%Y-%m-%d")
-                
-                summary_df = (parsed_df.withColumn("CURRENCY",substring(col("GLCC"),6,3)).withClumn("CGL",substring(col("GLCC"),9,10)).withCloumn("TYPE",lit(type_name)).withColumn("FILE_DATE",lit(file_date)).groupBy("CURRENCY","CGL","PRODUCT","TYPE","FILE_DATE"))
-                print("Summary dataframe created.")
-                summary_df.show(200, False)
-
-                # summary_count = summary_df.count()
-                # print(f"Summary records created : {summary_count}")
-
-
-                # if DeltaTable.isDeltaTable(spark, summary_output_path):
-                #     print(f"Deleting existing {type_name} records for FILE_DATE {file_date}")
-                #     delta_table = DeltaTable.forPath(spark, summary_output_path)
-                #     delta_table.delete(f"TYPE = '{type_name}' AND FILE_DATE = '{file_date}'")
-                #     print("Existing summary records deleted successfully.")
-                if(run_id>1):
-                    print(f"Rerun detected (Run id: {run_id}). "
-                                f"Deleting existing {type_name} for {file_date}")
-                    delta_table = DeltaTable.forPath(spark, summary_output_path)
-                    delta_table.delete(f"TYPE = '{type_name}' AND FILE_DATE = '{file_date}'")
-                    print("Existing summary records deleted successfully.")
-
-
-                # summary_df.write \
-                #     .format("delta") \
-                #     .mode("append") \
-                #     .save(summary_output_path)
-                
-                print(f"Summary written successfully."
-                            f"{type_name} - {file_date}")
+            <!-- new added for kafka template -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-kafka</artifactId>
+            </dependency>
+    </dependencies>
     
 
-
-                # ==================================================
-                # UPDATE TRACKER TABLE
-                # ==================================================
-    
-                tracker_df = spark.createDataFrame([(file_name,current_date,"PROCESSED",l)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-                print(f"{file_name} tracker updated.")
-            
-    
-    
-            except Exception as e:
-
-                print(f"Error processing {file_name}")
-                print("Exception occured while processing the file.")
-
-                tracker_df = spark.createDataFrame([(file_name,current_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-
-        # ======================================================
-        # MOVE TO NEXT DATE
-        # ======================================================
-        current_date += timedelta(days=1)
-
-    print("==========================================")
-    print("BGL Processing Completed Successfully")
-    print("==========================================")
-    #log_etl(spark,process_run_id,"bgl_pipeline",2,f"BGL pipeline completed successfully.")
-
-except Exception as e:
-    error_message = str(e)
-    print("BGL Pipeline Failed")
-    #log_etl(spark, process_run_id, "bgl_pipeline", 3, error_message)
-    raise
-
-finally:
-
-    try:
-        print("Stopping Spark Session")
-        spark.stop()
-        print("Stopped Spark Session")
-    except:
-        pass
-
-
-
-
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
