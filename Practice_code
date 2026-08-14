@@ -89,3 +89,113 @@ if len(unfound) > 0:
             f"NOT FOUND record already exists for {output_date}. "
             f"Skipping duplicate insertion."
         )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==========================================================
+# UPDATE TRACKER TABLE
+# ==========================================================
+try:
+
+    # Check whether this date previously had a NOT FOUND record
+    check_query = f"""
+    (
+        SELECT COUNT(*) AS CNT
+        FROM BGL_FILE_TRACKER
+        WHERE FILE_DATE = TO_DATE('{output_date}', 'DD-MON-RR')
+          AND STATUS = 'FILE NOT PRESENT'
+    )
+    """
+
+    check_df = read_oracle(spark, check_query)
+    not_found_count = check_df.collect()[0]["CNT"]
+
+    if not_found_count > 0:
+
+        # ======================================================
+        # FILE WAS PREVIOUSLY NOT FOUND
+        # UPDATE EXISTING RECORD
+        # ======================================================
+
+        print(
+            f"Existing NOT FOUND record found for {output_date}. "
+            f"Updating it to PROCESSED."
+        )
+
+        update_query = f"""
+        UPDATE BGL_FILE_TRACKER
+        SET FILE_NAME = '{file_name}',
+            STATUS = 'PROCESSED',
+            ROW_COUNT = {total_row_count}
+        WHERE FILE_DATE = TO_DATE('{output_date}', 'DD-MON-RR')
+          AND STATUS = 'FILE NOT PRESENT'
+        """
+
+        print(f"Executing Oracle update for {output_date}")
+
+        update_oracle(
+            spark,
+            update_query
+        )
+
+        print(
+            f"Existing NOT FOUND record updated successfully "
+            f"for {output_date}."
+        )
+
+    else:
+
+        # ======================================================
+        # FIRST TIME FILE IS BEING PROCESSED
+        # INSERT NEW RECORD
+        # ======================================================
+
+        print(
+            f"No previous NOT FOUND record for {output_date}. "
+            f"Inserting new PROCESSED record."
+        )
+
+        tracker_df = spark.createDataFrame(
+            [
+                (
+                    file_name,
+                    output_date,
+                    "PROCESSED",
+                    total_row_count
+                )
+            ],
+            [
+                "FILE_NAME",
+                "FILE_DATE",
+                "STATUS",
+                "ROW_COUNT"
+            ]
+        )
+
+        tracker_df.show(20, False)
+
+        write_oracle(
+            tracker_df,
+            "BGL_FILE_TRACKER"
+        )
+
+        print(
+            f"{file_name} tracker record inserted."
+        )
+
+except Exception as e:
+
+    print(f"Error {e} processing tracker")
+    spark.stop()
+    sys.exit()
