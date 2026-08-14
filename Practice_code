@@ -68,7 +68,7 @@ try:
     spark = create_spark_session("BGL_PIPELINE", HDFS_BASE)
 
     today = get_etl_date(spark)
-    # today=datetime(2026,1,30).date()
+    # today=datetime(2026,4,5).date()
     posting_date_str = today.strftime("%d-%m-%Y")
     today_str = posting_date_str
 
@@ -137,11 +137,32 @@ try:
     java_import(spark._jvm, "org.apache.hadoop.fs.Path")
     fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
 
-    current_date = from_date #31st march
     
-    while current_date <= to_date: #31st march <= 31st march
+    last_processed_date = from_date.strftime("%d-%m-%Y")
+    date_format = "%d-%m-%Y"
+    today = get_etl_date(spark)
+    posting_date_str = today.strftime("%d-%m-%Y")
+    dates = [last_processed_date, posting_date_str]
+   
+    start_date = datetime.strptime(dates[0], date_format)
+    end_date = datetime.strptime(dates[1], date_format)
+    generated_dates = []
+    current_date = start_date
+    while current_date <= end_date:       
+        generated_dates.append(current_date.strftime(date_format))        
+        current_date += timedelta(days=1)
+    print(generated_dates)
+    print(generated_dates)
+    print(generated_dates)
+    print(generated_dates)
+
+    
+ 
+ 
+    for current_date in generated_dates:
+        
         print("Entered while loop 1111111111111111111111111111111111111111111111111")
-        folder_date = current_date.strftime("%d-%m-%Y") #31st march
+        folder_date = current_date
         # input_folder = f"{HDFS_BASE}/CBS-FILES/31-01-2026/misc"
         input_folder = f"{HDFS_BASE}/CBS-FILES/{folder_date}/misc/BGL*"
         allpaths=[]
@@ -154,32 +175,40 @@ try:
         print(unfound)
 
 
-        # if len(unfound)>0:
-        #     print(f"{folder_date} folder not present.") 
-        #     tracker_df = spark.createDataFrame([("NOT FOUND", current_date, "FILE NOT PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
-        #     # tracker_df.show(20,False)
-        #     write_oracle(tracker_df, "BGL_FILE_TRACKER") 
 
         # ======================================================
         # DATALAKE PATH
         # ======================================================
-        year = current_date.strftime("%Y")
-        month = current_date.strftime("%b").upper()
-        day = current_date.strftime("%d")
+        date_str = current_date
+        date_obj = datetime.strptime(date_str, "%d-%m-%Y")    
+        year  = date_obj.strftime("%Y")
+        month = date_obj.strftime("%b").upper()
+        day   = date_obj.strftime("%d")
+        output_date = date_obj.strftime("%d-%b-%y").upper()
     
         output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/BANCS24/BGL")
         summary_output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/PRODUCT_WISE/datalake")
         create_path_if_not_exists(spark, output_path)
         create_path_if_not_exists(spark, summary_output_path)
+
+
+        if len(unfound)>0:
+            # print(f"{folder_date} folder not present.") 
+            tracker_df = spark.createDataFrame([("NOT FOUND", output_date, "FILE NOT PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
+            # tracker_df.show(20,False)
+            write_oracle(tracker_df, "BGL_FILE_TRACKER") 
+            
     
         # ======================================================
         # LOOP THROUGH FILES
         # ======================================================
         
-        try:
+        else:
+            try:
                 # ==================================================
                 # READ FILE
                 # ==================================================
+                print(input_folder)
                 file_df = spark.read.format("text").load(input_folder).withColumn("FILE_NAME", regexp_replace(substring_index(input_file_name(), "/",-1), r"\.txt.gz$",""))
 
                 file_name = file_df.select("FILE_NAME").first()["FILE_NAME"]
@@ -229,7 +258,7 @@ try:
                         file_name.split("_")[2],
                         "%d%m%Y").strftime("%d-%m-%Y")
                     
-                    summary_df = (parsed_df.withColumn("CGL",substring(col("GLCC"),9,10)).withColumn("CURRENCY",substring(col("GLCC"),6,3)).withColumn("TYPE",lit(type_name)).withColumn("DATE",lit(file_date)).withColumn("AMOUNT",col("AMOUNT").cast("decimal(20,2)")).groupBy("CGL","CURRENCY","PRODUCT","TYPE","DATE").agg(sum("AMOUNT").alias("BALANCE")).select("CGL","CURRENCY","PRODUCT","BALANCE","TYPE","DATE"))
+                    summary_df = (parsed_df.withColumn("CGL",substring(col("GLCC"),9,10)).withColumn("CURRENCY",substring(col("GLCC"),6,3)).withColumn("TYPE",lit(type_name)).withColumn("DATE",lit(output_date)).withColumn("AMOUNT",col("AMOUNT").cast("decimal(20,2)")).groupBy("CGL","CURRENCY","PRODUCT","TYPE","DATE").agg(sum("AMOUNT").alias("BALANCE")).select("CGL","CURRENCY","PRODUCT","BALANCE","TYPE","DATE"))
                     
                     # summary_count = summary_df.count()
                     summary_df.show(200, False)
@@ -239,7 +268,7 @@ try:
 
                     if(run_id>1):
                         print(f"Rerun detected (Run id: {run_id}). "
-                                    f"Deleting existing {type_name} for {file_date}")
+                                    f"Deleting existing {type_name} for {output_date}")
                         delta_table = DeltaTable.forPath(spark, summary_output_path)
                         delta_table.delete(f"TYPE = '{type_name}' AND DATE = '{file_date}'")
                         print("Existing summary records deleted successfully.")
@@ -264,7 +293,8 @@ try:
                 # UPDATE TRACKER TABLE
                 # ==================================================
                 try:
-                    tracker_df = spark.createDataFrame([(file_name,current_date,"PROCESSED",total_row_count)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
+                    
+                    tracker_df = spark.createDataFrame([(file_name,output_date,"PROCESSED",total_row_count)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
                     tracker_df.show(20,False)
                     write_oracle(tracker_df,"BGL_FILE_TRACKER")
                     print(f"{file_name} tracker updated.")
@@ -274,24 +304,24 @@ try:
                     print(f"Error {e} processing tracker ")
                     spark.stop()
                     sys.exit()
-
+                print("==========================================")
+                print(f"BGL Processing Completed Successfully for {output_date}")
+                print("==========================================")
     
-        except Exception as e:
+            except Exception as e:
 
                 print(f"Error processing {file_name}")
                 print("Exception occured while processing the file.")
 
-                tracker_df = spark.createDataFrame([(file_name,current_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
+                tracker_df = spark.createDataFrame([(file_name,output_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
                 write_oracle(tracker_df,"BGL_FILE_TRACKER")
 
         # ======================================================
         # MOVE TO NEXT DATE
         # ======================================================
-        current_date += timedelta(days=1)
+        
 
-    print("==========================================")
-    print("BGL Processing Completed Successfully")
-    print("==========================================")
+    
     #log_etl(spark,process_run_id,"bgl_pipeline",2,f"BGL pipeline completed successfully.")
 
 except Exception as e:
