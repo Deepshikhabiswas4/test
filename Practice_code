@@ -51,7 +51,6 @@ from pyspark.sql.types import (
 
 from delta.tables import DeltaTable
 
-
 # ==========================================================
 # COMMON METHODS
 # ==========================================================
@@ -61,8 +60,6 @@ from common.dateUtil import get_etl_date
 from common.createSpark import create_spark_session
 from common.fileUtil import get_hdfs_base, write_csv_with_filename
 from common.create_path_if_not_exists import create_path_if_not_exists
-
-# log_etl related imports
 from common.processRun import get_process_run_id
 from common.constants import Process
 from common.log_etl_modified import log_etl
@@ -85,9 +82,7 @@ oracle_driver = oracle_properties["driver"]
 # ==========================================================
 
 def read_oracle(spark, query_or_table):
-    """
-    Reads a table or query from Oracle DB using JDBC.
-    """
+    """Reads a table or query from Oracle DB using JDBC."""
 
     try:
 
@@ -115,14 +110,22 @@ def read_oracle(spark, query_or_table):
 
 
 # ==========================================================
-# MAIN PIPELINE
+# MAIN
 # ==========================================================
 
-def main(spark, hdfs, etl_date):
+def main(spark, hdfs, etl_date, process_run_id):
 
-    print("====================================================")
-    print("ACCRUED INTEREST PIPELINE STARTED")
-    print("====================================================")
+    # ======================================================
+    # PIPELINE START LOG
+    # ======================================================
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "Accrued interest pipeline started"
+    )
 
     # ======================================================
     # DATE PREPARATION
@@ -132,39 +135,63 @@ def main(spark, hdfs, etl_date):
     date_var = etl_date.strftime("%d-%m-%Y")
     file_date = etl_date.strftime("%Y%m%d")
 
-    print(f"ETL Date              : {etl_date}")
-    print(f"Date String           : {date_str}")
-    print(f"Date Variable         : {date_var}")
-    print(f"File Date             : {file_date}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"ETL date identified: {date_str}"
+    )
 
-    date_obj = datetime.strptime(date_var, "%d-%m-%Y")
+    date_obj = datetime.strptime(
+        date_var,
+        "%d-%m-%Y"
+    )
 
-    print(f"Date Object           : {date_obj}")
+    output_date = date_obj.strftime(
+        "%d-%b-%y"
+    ).upper()
 
-    output_date = date_obj.strftime("%d-%b-%y").upper()
-
-    print(f"Oracle Balance Date   : {output_date}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Oracle balance date prepared: {output_date}"
+    )
 
     # ======================================================
     # INPUT / OUTPUT PATH
     # ======================================================
 
-    path = f"{hdfs}/CBS-FILES/{date_var}/misc/CON*"
-
-    output_path = (
-        f"{hdfs}/reports/{date_str}/CONSOLIDATED-DEPOSITS-FILES/"
+    path = (
+        f"{hdfs}/CBS-FILES/{date_var}/misc/CON*"
     )
 
-    print(f"Input Path            : {path}")
-    print(f"Output Path           : {output_path}")
+    output_path = (
+        f"{hdfs}/reports/{date_str}/"
+        f"CONSOLIDATED-DEPOSITS-FILES/"
+    )
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Input path identified: {path}"
+    )
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Output path identified: {output_path}"
+    )
 
     # ======================================================
-    # READ CONSOLIDATED DEPOSITS FILE
+    # READ RAW FILE
     # ======================================================
-
-    print("====================================================")
-    print("Reading Consolidated Deposits File")
-    print("====================================================")
 
     raw_df = (
         spark.read
@@ -175,86 +202,127 @@ def main(spark, hdfs, etl_date):
 
     raw_count = raw_df.count()
 
-    print(f"Raw records read      : {raw_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Consolidated deposits file read successfully. "
+        f"Records read: {raw_count}"
+    )
 
     # ======================================================
-    # PARSE INPUT FILE
+    # PARSE DATA
     # ======================================================
-
-    print("====================================================")
-    print("Parsing Consolidated Deposits Data")
-    print("====================================================")
 
     parsed_df = (
         raw_df
         .withColumn(
             "branch_code",
-            F.substring(F.col("glcc"), 1, 5)
+            F.substring(
+                F.col("glcc"),
+                1,
+                5
+            )
         )
         .withColumn(
             "currency_code",
-            F.substring(F.col("glcc"), 6, 3)
+            F.substring(
+                F.col("glcc"),
+                6,
+                3
+            )
         )
         .withColumn(
             "cgl",
-            F.substring(F.col("glcc"), 9, 10)
+            F.substring(
+                F.col("glcc"),
+                9,
+                10
+            )
         )
         .withColumn(
             "segment_code",
-            F.substring(F.col("glcc"), 13, 4)
+            F.substring(
+                F.col("glcc"),
+                13,
+                4
+            )
         )
         .withColumn(
             "amount",
-            F.col("amount").cast("decimal(18, 4)")
+            F.col("amount").cast(
+                "decimal(18, 4)"
+            )
         )
     )
 
     parsed_count = parsed_df.count()
 
-    print(f"Parsed records        : {parsed_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Consolidated deposits data parsed successfully. "
+        f"Records parsed: {parsed_count}"
+    )
 
     # ======================================================
-    # READ MASTER TABLES
+    # READ BRANCH MASTER
     # ======================================================
-
-    print("====================================================")
-    print("Reading Oracle Master Tables")
-    print("====================================================")
-
-    print("Reading BRANCH_MASTER")
 
     branch_master = read_oracle(
         spark,
         "SELECT CODE AS BRANCH_CODE FROM BRANCH_MASTER"
     )
 
-    print("BRANCH_MASTER read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "BRANCH_MASTER read successfully"
+    )
 
-    print("Reading CGL_MASTER")
+    # ======================================================
+    # READ CGL MASTER
+    # ======================================================
 
     cgl_master = read_oracle(
         spark,
         "SELECT CGL_NUMBER AS cgl FROM CGL_MASTER"
     )
 
-    print("CGL_MASTER read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "CGL_MASTER read successfully"
+    )
 
-    print("Reading CURRENCY_MASTER")
+    # ======================================================
+    # READ CURRENCY MASTER
+    # ======================================================
 
     currency_master = read_oracle(
         spark,
-        "SELECT CURRENCY_CODE, CURRENCY_RATE FROM CURRENCY_MASTER"
+        "SELECT CURRENCY_CODE, CURRENCY_RATE "
+        "FROM CURRENCY_MASTER"
     )
 
-    print("CURRENCY_MASTER read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "CURRENCY_MASTER read successfully"
+    )
 
     # ======================================================
-    # VALIDATE DATA
+    # VALIDATION
     # ======================================================
-
-    print("====================================================")
-    print("Validating Consolidated Deposits Data")
-    print("====================================================")
 
     validated_df = (
         parsed_df
@@ -277,15 +345,18 @@ def main(spark, hdfs, etl_date):
 
     validated_count = validated_df.count()
 
-    print(f"Validated records     : {validated_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Data validation completed successfully. "
+        f"Validated records: {validated_count}"
+    )
 
     # ======================================================
     # CALCULATE FINAL AMOUNT
     # ======================================================
-
-    print("====================================================")
-    print("Calculating Final Amount")
-    print("====================================================")
 
     result_df = (
         validated_df
@@ -304,7 +375,8 @@ def main(spark, hdfs, etl_date):
         .withColumn(
             "final_amount",
             F.round(
-                F.col("amount") * F.col("effective_rate"),
+                F.col("amount") *
+                F.col("effective_rate"),
                 2
             )
         )
@@ -314,58 +386,74 @@ def main(spark, hdfs, etl_date):
 
     result_count = result_df.count()
 
-    print(f"Result records        : {result_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Final amount calculation completed. "
+        f"Result records: {result_count}"
+    )
 
     # ======================================================
-    # READ ACCRUED INTEREST MASTER TABLES
+    # READ ACCR_INT_HEADS
     # ======================================================
-
-    print("====================================================")
-    print("Reading Accrued Interest Master Tables")
-    print("====================================================")
-
-    print("Reading ACCR_INT_HEADS")
 
     accr_int_heads = read_oracle(
         spark,
         "SELECT HEAD_CODE, FLAG FROM ACCR_INT_HEADS"
     )
 
-    print("ACCR_INT_HEADS read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "ACCR_INT_HEADS read successfully"
+    )
 
-    print("Reading RB_PARSED_TEMPLATE")
+    # ======================================================
+    # READ RB_PARSED_TEMPLATE
+    # ======================================================
 
     rb_parsed_table = read_oracle(
         spark,
-        """
-        SELECT HEAD_CODE, HEAD_DESC, CGL AS cgl
-        FROM RB_PARSED_TEMPLATE
-        """
+        "SELECT HEAD_CODE, HEAD_DESC, CGL AS cgl "
+        "FROM RB_PARSED_TEMPLATE"
     )
 
-    print("RB_PARSED_TEMPLATE read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "RB_PARSED_TEMPLATE read successfully"
+    )
 
-    print("Reading GL_BALANCE")
+    # ======================================================
+    # READ GL BALANCE
+    # ======================================================
 
     gl_balance_table = read_oracle(
         spark,
-        f"""
-        SELECT CGL, INR_BALANCE
-        FROM GL_BALANCE
-        WHERE BALANCE_DATE = '{output_date}'
-        AND CGL LIKE '5%'
-        """
+        f"SELECT CGL, INR_BALANCE "
+        f"FROM GL_BALANCE "
+        f"WHERE BALANCE_DATE = '{output_date}' "
+        f"AND CGL LIKE '5%'"
     )
 
-    print("GL_BALANCE read successfully.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"GL_BALANCE read successfully for balance date "
+        f"{output_date}"
+    )
 
     # ======================================================
     # CREATE HEAD-CGL MAP
     # ======================================================
-
-    print("====================================================")
-    print("Creating Head-CGL Mapping")
-    print("====================================================")
 
     head_cgl_map = (
         F.broadcast(accr_int_heads)
@@ -376,13 +464,22 @@ def main(spark, hdfs, etl_date):
         )
     )
 
-    head_cgl_map.show(10, False)
-
     head_cgl_map = head_cgl_map.cache()
 
     head_map_count = head_cgl_map.count()
 
-    print(f"Head-CGL mapping rows : {head_map_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"HEAD-CGL mapping created successfully. "
+        f"Mapping records: {head_map_count}"
+    )
+
+    # ======================================================
+    # HEAD DATAFRAME
+    # ======================================================
 
     head_df = (
         head_cgl_map
@@ -398,15 +495,18 @@ def main(spark, hdfs, etl_date):
 
     head_count = head_df.count()
 
-    print(f"Distinct heads        : {head_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Head dataframe created successfully. "
+        f"Distinct heads: {head_count}"
+    )
 
     # ======================================================
     # FILE BALANCE
     # ======================================================
-
-    print("====================================================")
-    print("Calculating File Balance")
-    print("====================================================")
 
     file_balance_df = (
         head_cgl_map
@@ -417,21 +517,26 @@ def main(spark, hdfs, etl_date):
         )
         .groupBy("HEAD_CODE")
         .agg(
-            F.sum("final_amount").alias("file_balance")
+            F.sum("final_amount").alias(
+                "file_balance"
+            )
         )
     )
 
     file_balance_count = file_balance_df.count()
 
-    print(f"File balance heads    : {file_balance_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"File balance calculated successfully. "
+        f"Head records: {file_balance_count}"
+    )
 
     # ======================================================
     # GL MEMO BALANCE
     # ======================================================
-
-    print("====================================================")
-    print("Calculating GL Memo Balance")
-    print("====================================================")
 
     gl_memo_df = (
         head_cgl_map
@@ -442,21 +547,26 @@ def main(spark, hdfs, etl_date):
         )
         .groupBy("HEAD_CODE")
         .agg(
-            F.sum("INR_BALANCE").alias("memo_balance")
+            F.sum("INR_BALANCE").alias(
+                "memo_balance"
+            )
         )
     )
 
     gl_memo_count = gl_memo_df.count()
 
-    print(f"Memo balance heads    : {gl_memo_count}")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"GL memo balance calculated successfully. "
+        f"Head records: {gl_memo_count}"
+    )
 
     # ======================================================
     # FINAL SUMMARY
     # ======================================================
-
-    print("====================================================")
-    print("Creating Final Summary")
-    print("====================================================")
 
     final_summary_df = (
         head_df
@@ -488,7 +598,8 @@ def main(spark, hdfs, etl_date):
             "total_balance",
             F.when(
                 F.col("FLAG") == "Y",
-                F.col("file_balance") - F.col("memo_balance")
+                F.col("file_balance")
+                - F.col("memo_balance")
             ).otherwise(
                 F.col("file_balance")
             )
@@ -500,30 +611,41 @@ def main(spark, hdfs, etl_date):
 
     final_summary_count = final_summary_df.count()
 
-    print(
-        f"Final summary records: {final_summary_count}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Final accrued interest summary created successfully. "
+        f"Records: {final_summary_count}"
     )
 
     # ======================================================
-    # PSV OUTPUT
+    # PSV EXPORT
     # ======================================================
-
-    print("====================================================")
-    print("Creating Accrued Interest PSV File")
-    print("====================================================")
 
     psv_export_df = (
         final_summary_df
-        .orderBy(F.col("HEAD_CODE").asc())
+        .orderBy(
+            F.col("HEAD_CODE").asc()
+        )
         .select(
-            F.col("HEAD_CODE").alias("NWSA_HEAD"),
-            F.col("HEAD_DESC").alias("DESCRIPTION"),
+            F.col("HEAD_CODE").alias(
+                "NWSA_HEAD"
+            ),
+            F.col("HEAD_DESC").alias(
+                "DESCRIPTION"
+            ),
             F.format_string(
                 "%.2f",
                 F.col("total_balance")
-            ).alias("AMOUNT")
+            ).alias(
+                "AMOUNT"
+            )
         )
-        .orderBy(col("HEAD_CODE").asc())
+        .orderBy(
+            col("HEAD_CODE").asc()
+        )
     )
 
     create_path_if_not_exists(
@@ -531,13 +653,18 @@ def main(spark, hdfs, etl_date):
         output_path
     )
 
-    print("Output path created/verified.")
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Output directory created/verified: "
+        f"{output_path}"
+    )
 
     filename = (
         f"ACCR_INT_FILE_FINCORE_{file_date}.psv"
     )
-
-    print(f"Writing PSV file       : {filename}")
 
     write_csv_with_filename(
         df=psv_export_df,
@@ -547,20 +674,23 @@ def main(spark, hdfs, etl_date):
         sep="|"
     )
 
-    print(
-        f"PSV file created successfully: {filename}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Accrued interest PSV file created successfully: "
+        f"{filename}"
     )
 
     # ======================================================
-    # ACCRUED INTEREST TXT REPORT
+    # TXT REPORT
     # ======================================================
 
-    print("====================================================")
-    print("Creating Accrued Interest TXT Report")
-    print("====================================================")
-
     as_on_date = date_str
-    run_date = etl_date.strftime("%d%m%Y")
+    run_date = etl_date.strftime(
+        "%d%m%Y"
+    )
 
     rows = (
         final_summary_df
@@ -572,17 +702,16 @@ def main(spark, hdfs, etl_date):
         .collect()
     )
 
-    print(
-        f"Rows collected for report: {len(rows)}"
-    )
-
     header_lines = [
         f"'{' ' * 48}STATE BANK OF INDIA\n",
         f"{' ' * 49}000  INDIAN RUPEE\n",
-        f"     REPORT ON DAILY  ACCRUED INTEREST ON DEPOSIT (NDTL) AS ON  "
-        f"{as_on_date}{' ' * 8}RUN DATE:{run_date}\n\n",
+        f"     REPORT ON DAILY  ACCRUED INTEREST ON "
+        f"DEPOSIT (NDTL) AS ON  {as_on_date}"
+        f"{' ' * 8}RUN DATE:{run_date}\n\n",
         "=" * 100 + "\n",
-        f"{'NWSA HEAD':<21}{'DESCRIPTION':<55}{'AMOUNT':>24}\n",
+        f"{'NWSA HEAD':<21}"
+        f"{'DESCRIPTION':<55}"
+        f"{'AMOUNT':>24}\n",
         "=" * 100 + "\n"
     ]
 
@@ -609,10 +738,6 @@ def main(spark, hdfs, etl_date):
         f"ACCR_INT_REPORT_{file_date}.txt"
     )
 
-    print(
-        f"Writing TXT report     : {report_filename}"
-    )
-
     write_csv_with_filename(
         df=report_df,
         output_dir=output_path,
@@ -620,38 +745,41 @@ def main(spark, hdfs, etl_date):
         header=False
     )
 
-    print(
-        f"TXT report created successfully: {report_filename}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Accrued interest TXT report created successfully: "
+        f"{report_filename}"
     )
 
     # ======================================================
-    # INTERBANK REPORT PIPELINE
+    # INTERBANK PIPELINE
     # ======================================================
-
-    print("====================================================")
-    print("INTERBANK REPORT PIPELINE STARTED")
-    print("====================================================")
-
-    print("Reading ACCR_INT_INTERBANK")
 
     accr_int_interbank = read_oracle(
         spark,
         "ACCR_INT_INTERBANK"
     )
 
-    print(
-        "ACCR_INT_INTERBANK read successfully."
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        "ACCR_INT_INTERBANK read successfully"
     )
 
     # ======================================================
     # INTERBANK RESULT
     # ======================================================
 
-    print("Creating Interbank Result DataFrame")
-
     interbank_result_df = result_df.join(
         accr_int_interbank.select(
-            F.col("SEGMENT_CODE").alias("segment_code")
+            F.col("SEGMENT_CODE").alias(
+                "segment_code"
+            )
         ),
         on="segment_code",
         how="inner"
@@ -661,16 +789,18 @@ def main(spark, hdfs, etl_date):
         interbank_result_df.count()
     )
 
-    print(
-        f"Interbank result records: "
-        f"{interbank_result_count}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank result dataframe created successfully. "
+        f"Records: {interbank_result_count}"
     )
 
     # ======================================================
     # INTERBANK FILE BALANCE
     # ======================================================
-
-    print("Calculating Interbank File Balance")
 
     interbank_file_balance_df = (
         head_cgl_map
@@ -691,16 +821,18 @@ def main(spark, hdfs, etl_date):
         interbank_file_balance_df.count()
     )
 
-    print(
-        f"Interbank file balance heads: "
-        f"{interbank_file_balance_count}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank file balance calculated successfully. "
+        f"Head records: {interbank_file_balance_count}"
     )
 
     # ======================================================
     # INTERBANK MEMO CGL MAP
     # ======================================================
-
-    print("Creating Interbank Memo CGL Mapping")
 
     interbank_memo_cgl_map = (
         head_cgl_map
@@ -731,16 +863,18 @@ def main(spark, hdfs, etl_date):
         interbank_memo_cgl_map.count()
     )
 
-    print(
-        f"Interbank memo CGL rows: "
-        f"{interbank_memo_map_count}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank memo CGL mapping created successfully. "
+        f"Records: {interbank_memo_map_count}"
     )
 
     # ======================================================
     # INTERBANK GL MEMO
     # ======================================================
-
-    print("Calculating Interbank GL Memo Balance")
 
     interbank_gl_memo_df = (
         interbank_memo_cgl_map
@@ -761,16 +895,18 @@ def main(spark, hdfs, etl_date):
         interbank_gl_memo_df.count()
     )
 
-    print(
-        f"Interbank memo balance heads: "
-        f"{interbank_gl_memo_count}"
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank GL memo balance calculated successfully. "
+        f"Head records: {interbank_gl_memo_count}"
     )
 
     # ======================================================
-    # INTERBANK FINAL SUMMARY
+    # INTERBANK SUMMARY
     # ======================================================
-
-    print("Creating Interbank Final Summary")
 
     interbank_summary_df = (
         head_df
@@ -792,4 +928,229 @@ def main(spark, hdfs, etl_date):
             )
         )
         .withColumn(
- 
+            "memo_balance",
+            F.coalesce(
+                F.col("memo_balance"),
+                F.lit(0.0)
+            )
+        )
+        .withColumn(
+            "total_balance",
+            F.when(
+                F.col("FLAG") == "Y",
+                F.col("file_balance")
+                - F.col("memo_balance")
+            ).otherwise(
+                F.col("file_balance")
+            )
+        )
+        .filter(
+            F.col("total_balance") != 0
+        )
+    )
+
+    interbank_summary_count = (
+        interbank_summary_df.count()
+    )
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank final summary created successfully. "
+        f"Records: {interbank_summary_count}"
+    )
+
+    # ======================================================
+    # INTERBANK PSV
+    # ======================================================
+
+    interbank_psv_df = (
+        interbank_summary_df
+        .orderBy(
+            F.col("HEAD_CODE").asc()
+        )
+        .select(
+            F.col("HEAD_CODE").alias(
+                "NWSA_HEAD"
+            ),
+            F.col("HEAD_DESC").alias(
+                "DESCRIPTION"
+            ),
+            F.format_string(
+                "%.2f",
+                F.col("total_balance")
+            ).alias(
+                "AMOUNT"
+            )
+        )
+        .sort(
+            col("HEAD_CODE")
+        )
+    )
+
+    filename_interbank = (
+        f"ACCR_INT_FILE_INTERBANK_{file_date}.psv"
+    )
+
+    write_csv_with_filename(
+        df=interbank_psv_df,
+        output_dir=output_path,
+        filename=filename_interbank,
+        header=True,
+        sep="|"
+    )
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank PSV file created successfully: "
+        f"{filename_interbank}"
+    )
+
+    # ======================================================
+    # INTERBANK TXT REPORT
+    # ======================================================
+
+    interbank_rows = (
+        interbank_summary_df
+        .orderBy(
+            F.col("HEAD_CODE").asc()
+        )
+        .select(
+            "HEAD_CODE",
+            "HEAD_DESC",
+            "total_balance"
+        )
+        .collect()
+    )
+
+    interbank_header_lines = [
+        f"'{' ' * 48}STATE BANK OF INDIA\n",
+        f"{' ' * 49}000  INDIAN RUPEE\n",
+        f"  REPORT ON DAILY  ACCRUED INTEREST ON "
+        f"INTERBANK DEPOSIT AS ON  {as_on_date}"
+        f"{' ' * 8}RUN DATE : {run_date}\n\n",
+        "=" * 100 + "\n",
+        f"{'NWSA HEAD':<21}"
+        f"{'DESCRIPTION':<55}"
+        f"{'AMOUNT':>24}\n",
+        "=" * 100 + "\n"
+    ]
+
+    interbank_body_lines = [
+        f"{str(r['HEAD_CODE'] or ''):<21}"
+        f"{str(r['HEAD_DESC'] or ''):<55}"
+        f"{float(r['total_balance'] or 0.0):>24.2f}\n"
+        for r in interbank_rows
+    ]
+
+    interbank_report_df = spark.createDataFrame(
+        [
+            (
+                "".join(interbank_header_lines)
+                + "".join(interbank_body_lines)
+                + "=" * 100
+                + "\n",
+            )
+        ],
+        ["value"]
+    )
+
+    interbank_report_filename = (
+        f"ACCR_INT_REPORT_INTERBANK{file_date}.txt"
+    )
+
+    write_csv_with_filename(
+        df=interbank_report_df,
+        output_dir=output_path,
+        filename=interbank_report_filename,
+        header=False
+    )
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        1,
+        f"Interbank TXT report created successfully: "
+        f"{interbank_report_filename}"
+    )
+
+    # ======================================================
+    # PIPELINE SUCCESS
+    # ======================================================
+
+    log_etl(
+        spark,
+        process_run_id,
+        "accrued_int",
+        2,
+        "Accrued interest pipeline completed successfully."
+    )
+
+
+# ==========================================================
+# DRIVER
+# ==========================================================
+
+if __name__ == "__main__":
+
+    PROCESS_ID = Process.CBS_ALL_DATA
+
+    BASE_HDFS = get_hdfs_base()
+
+    spark = create_spark_session(
+        "accrued_int",
+        BASE_HDFS
+    )
+
+    etl_date = get_etl_date(spark)
+
+    posting_date_str = etl_date.strftime(
+        "%d-%m-%Y"
+    )
+
+    process_run_id = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else get_process_run_id(
+            spark,
+            PROCESS_ID,
+            posting_date_str
+        )
+    )
+
+    try:
+
+        main(
+            spark,
+            BASE_HDFS,
+            etl_date,
+            process_run_id
+        )
+
+    except Exception as e:
+
+        error_message = str(e)
+
+        log_etl(
+            spark,
+            process_run_id,
+            "accrued_int",
+            3,
+            error_message
+        )
+
+        raise
+
+    finally:
+
+        try:
+            spark.stop()
+        except:
+            pass
+```
