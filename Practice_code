@@ -1,201 +1,321 @@
-def update_oracle(spark, query):
+import datetime 
+from pyspark.sql import SparkSession , functions as F
+import pyspark.sql.types as T
+from pyspark.sql.functions import col, substring, when, round as spark_round, coalesce, lit
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DateType
+from pyspark.sql.functions import  to_date,expr, round, lower, col,when, length, count, substring,trim, concat, lit, create_map, to_timestamp, sum,broadcast, coalesce,current_timestamp, first
+from pyspark.sql.types import DecimalType, StringType, StructType, StructField, LongType, DateType, TimestampType
+from datetime import date, timedelta , datetime
+from pyspark.sql.functions import desc
+import sys
+from py4j.java_gateway import java_import
+from delta.tables import DeltaTable 
+import concurrent.futures
+import builtins
+from pyspark.sql import Row
+
+import re   
+# =========== Common Methods =============================
+
+from common.properties import get_oracle_properties
+from common.dateUtil import get_etl_date
+from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base, write_csv_with_filename
+from common.create_path_if_not_exists import create_path_if_not_exists
+
+
+
+oracle_properties = get_oracle_properties()
+
+oracle_url = oracle_properties["url"]
+oracle_user = oracle_properties["user"]
+oracle_password = oracle_properties["password"]
+oracle_driver = oracle_properties["driver"]
+
+
+def read_oracle(spark, query_or_table):
+    """Reads a table or query from Oracle DB using JDBC."""
     try:
-        jvm = spark._jvm
-
-        connection = jvm.java.sql.DriverManager.getConnection(
-            oracle_url,
-            oracle_user,
-            oracle_password
-        )
-
-        statement = connection.createStatement()
-        statement.executeUpdate(query)
-
-        statement.close()
-        connection.close()
-
-        print("Oracle update successful.")
-
+        dbtable_val = f"({query_or_table}) src" if " " in query_or_table.strip() else query_or_table
+        
+        return spark.read.format("jdbc") \
+            .option("url", oracle_url) \
+            .option("dbtable", dbtable_val) \
+            .option("user", oracle_user) \
+            .option("password", oracle_password) \
+            .option("driver", oracle_driver) \
+            .option("fetchsize" , "10000") \
+            .load()
     except Exception as e:
-        print("Oracle update error:", str(e))
-        raise
+        print("Oracle read error:", str(e))
+        raise e
+
+def main(spark,hdfs,etl_date):
+  
+    date_str=etl_date.strftime("%Y-%m-%d")
+    date_var=etl_date.strftime("%d-%m-%Y")
+    file_date = etl_date.strftime('%Y%m%d')
+    print(date_str)
+    date_obj = datetime.strptime(date_var, "%d-%m-%Y")   
+    print(date_obj)
+    output_date = date_obj.strftime("%d-%b-%y").upper()
+
+    print(output_date)
+    # path = f"{hdfs}/CONSOLIDATED-DEPOSITS-FILES/{date_str}/CON*"
+    path = f"{hdfs}/CBS-FILES/{date_var}/misc/CON*"
+    # dev path = f"{hdfs}/raasheed/CON*"
+    
+
+    output_path =  f"{hdfs}/reports/{date_str}/CONSOLIDATED-DEPOSITS-FILES/"
+    # output_path =  f"file:///app/reports/{date_str}/"
+
+ 
+
+    
+    raw_df =  spark.read.option("header", "false").csv(path) \
+        .toDF("glcc", "amount")
+    
+    # raw_df.show(10,False)
+
+
+    parsed_df = raw_df.withColumn("branch_code", F.substring(F.col("glcc"), 1, 5)) \
+                      .withColumn("currency_code", F.substring(F.col("glcc"), 6, 3)) \
+                      .withColumn("cgl", F.substring(F.col("glcc"), 9, 10)) \
+                      .withColumn("segment_code", F.substring(F.col("glcc"), 13, 4)) \
+                      .withColumn("amount", F.col("amount").cast("decimal(18, 4)"))
 
 
 
+    branch_master   = read_oracle(spark, "SELECT CODE AS BRANCH_CODE FROM BRANCH_MASTER")
+    cgl_master      = read_oracle(spark, "SELECT CGL_NUMBER AS cgl FROM CGL_MASTER")
+    currency_master = read_oracle(spark, "SELECT CURRENCY_CODE, CURRENCY_RATE FROM CURRENCY_MASTER")
+    
+    
 
-
-
-
-
-
-
-
-
-
-
-if len(unfound) > 0:
-
-    # ==========================================================
-    # CHECK IF NOT FOUND RECORD ALREADY EXISTS
-    # ==========================================================
-    check_query = f"""
-    (
-        SELECT COUNT(*) AS CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_DATE = TO_DATE('{output_date}', 'DD-MON-RR')
-          AND STATUS = 'FILE NOT PRESENT'
+    validated_df = parsed_df \
+        .join(F.broadcast(branch_master), on="branch_code", how="inner") \
+        .join(F.broadcast(cgl_master), on="cgl", how="inner") \
+        .join(F.broadcast(currency_master), on="currency_code", how="left")
+    
+    result_df = validated_df.withColumn(
+        "effective_rate",
+        F.when(F.col("currency_code") == "INR", F.lit(1.0)).otherwise(F.coalesce(F.col("currency_rate"), F.lit(1.0)))
+    ).withColumn(
+        "final_amount",
+        F.round(F.col("amount") * F.col("effective_rate"), 2)
     )
-    """
+    result_df = result_df.cache()
 
-    check_df = read_oracle(spark, check_query)
-    not_found_count = check_df.collect()[0]["CNT"]
+    # result_df.show(10,False)
 
-    if not_found_count == 0:
+    accr_int_heads  = read_oracle(spark, "SELECT HEAD_CODE, FLAG FROM ACCR_INT_HEADS")
+    rb_parsed_table = read_oracle(spark, "SELECT HEAD_CODE , HEAD_DESC,CGL AS cgl FROM RB_PARSED_TEMPLATE")
+    gl_balance_table = read_oracle(spark, f"SELECT CGL , INR_BALANCE FROM GL_BALANCE WHERE BALANCE_DATE ='{output_date}' and CGL  LIKE '5%'") 
+    # gl_balance_table.show(100,False)
+ 
+    
+    head_cgl_map = F.broadcast(accr_int_heads).join(rb_parsed_table, on="HEAD_CODE", how="inner")
+    head_cgl_map.show(10,False)
+    head_cgl_map = head_cgl_map.cache()
+    
+    head_df = head_cgl_map.select("HEAD_CODE","FLAG","HEAD_DESC").distinct()
 
-        print(
-            f"No BGL file found for {output_date}. "
-            f"Inserting NOT FOUND record."
-        )
+    head_df = head_df.cache()
+    file_balance_df = head_cgl_map.join(result_df, on="cgl", how="inner") \
+        .groupBy("HEAD_CODE") \
+        .agg(F.sum("final_amount").alias("file_balance"))
+    result_df.count()
 
-        tracker_df = spark.createDataFrame(
-            [
-                (
-                    "NOT FOUND",
-                    output_date,
-                    "FILE NOT PRESENT"
-                )
-            ],
-            [
-                "FILE_NAME",
-                "FILE_DATE",
-                "STATUS"
-            ]
-        )
+    # file_balance_df.show(100,False)
 
-        tracker_df.show(20, False)
+    # gl_memo_df = head_cgl_map.filter(F.col("cgl").startswith("5")) \
+    gl_memo_df = head_cgl_map \
+        .join(gl_balance_table, on="cgl", how="inner") \
+        .groupBy("HEAD_CODE") \
+        .agg(F.sum("INR_BALANCE").alias("memo_balance"))
+    # gl_memo_df.show(10,False)
+    print("update ")
+ 
+    final_summary_df = head_df \
+        .join(file_balance_df, on="HEAD_CODE", how="left") \
+        .join(gl_memo_df, on="HEAD_CODE", how="left") \
+        .withColumn("file_balance", F.coalesce(F.col("file_balance"), F.lit(0.0))) \
+        .withColumn("memo_balance", F.coalesce(F.col("memo_balance"), F.lit(0.0))) \
+        .withColumn(
+            "total_balance",
+            F.when(F.col("FLAG") == "Y", F.col("file_balance") - F.col("memo_balance"))
+             .otherwise(F.col("file_balance"))
+        ) \
+        .filter(F.col("total_balance") != 0)  # <-- Keeps only non-zero rows
+    print("ssup")
+    # final_summary_df.show(10,False)
+ 
 
-        write_oracle(
-            tracker_df,
-            "BGL_FILE_TRACKER"
-        )
+    
+    # 1. Output Pipe-Separated File (PSV)
+    psv_export_df = final_summary_df.orderBy(F.col("HEAD_CODE").asc()).select(
+        F.col("HEAD_CODE").alias("NWSA_HEAD"),
+        F.col("HEAD_DESC").alias("DESCRIPTION"),
+        F.format_string("%.2f", F.col("total_balance")).alias("AMOUNT")
+    ).orderBy(col("HEAD_CODE").asc())
+    
+    # psv_export_df.show(10,False)
+    # spark.stop()
+    # sys.exit()
 
-        print(
-            f"NOT FOUND record inserted for {output_date}."
-        )
+    create_path_if_not_exists(spark,output_path)
+    print("psv file creation")
+    
+    filename = f"ACCR_INT_FILE_FINCORE_{file_date}.psv"
 
-    else:
-
-        print(
-            f"NOT FOUND record already exists for {output_date}. "
-            f"Skipping duplicate insertion."
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ==========================================================
-# UPDATE TRACKER TABLE
-# ==========================================================
-try:
-
-    # Check whether this date previously had a NOT FOUND record
-    check_query = f"""
-    (
-        SELECT COUNT(*) AS CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_DATE = TO_DATE('{output_date}', 'DD-MON-RR')
-          AND STATUS = 'FILE NOT PRESENT'
+    write_csv_with_filename(
+        df=psv_export_df,
+        output_dir=output_path,
+        filename=filename,
+        header=True,
+        sep="|"
     )
-    """
+    print("completed")
+ 
+    as_on_date = date_str
+    run_date = etl_date.strftime("%d%m%Y")
+    rows = final_summary_df.select("HEAD_CODE", "HEAD_DESC", "total_balance").collect()
+    
+    header_lines = [
+        f"'{' '*48}STATE BANK OF INDIA\n",
+        f"{' '*49}000  INDIAN RUPEE\n",
+        f"     REPORT ON DAILY  ACCRUED INTEREST ON DEPOSIT (NDTL) AS ON  {as_on_date}{' '*8}RUN DATE:{run_date}\n\n",
+        "=" * 100 + "\n",
+        f"{'NWSA HEAD':<21}{'DESCRIPTION':<55}{'AMOUNT':>24}\n",
+        "=" * 100 + "\n"
+    ]
+    
+    body_lines = [
+        f"{str(r['HEAD_CODE'] or ''):<21}{str(r['HEAD_DESC'] or ''):<55}{float(r['total_balance'] or 0.0):>24.2f}\n"
+        for r in rows
+    ]
+    
+    report_df = spark.createDataFrame(
+        [("".join(header_lines) + "".join(body_lines) + "=" * 100 + "\n",)],
+        ["value"]
+    )
+    
+    write_csv_with_filename(
+        df=report_df,
+        output_dir=output_path,
+        filename=f"ACCR_INT_REPORT_{file_date}.txt",
+        header=False
+    )
+    print("completed")
 
-    check_df = read_oracle(spark, check_query)
-    not_found_count = check_df.collect()[0]["CNT"]
+    # -------------------------------------------------------------------------
+    # INTERBANK REPORT PIPELINE
+    # -------------------------------------------------------------------------
 
-    if not_found_count > 0:
+    accr_int_interbank = read_oracle(spark, "ACCR_INT_INTERBANK")
+    
+    # interbank_segments = accr_int_interbank.select("segment_code").distinct()
+    interbank_result_df = result_df.join(
+        accr_int_interbank.select(F.col("SEGMENT_CODE").alias("segment_code")),
+        on="segment_code",
+        how="inner"
+    )
+    # interbank_result_df.show(10,False)
+    
+    interbank_file_balance_df = head_cgl_map.join(interbank_result_df, on="cgl", how="inner") \
+        .groupBy("HEAD_CODE") \
+        .agg(F.sum("final_amount").alias("file_balance"))
+    
+    # interbank_file_balance_df.show(100,False)
 
-        # ======================================================
-        # FILE WAS PREVIOUSLY NOT FOUND
-        # UPDATE EXISTING RECORD
-        # ======================================================
+    interbank_memo_cgl_map = head_cgl_map.filter(F.col("cgl").startswith("5")) \
+    .withColumn("segment_code", F.substring(F.col("cgl"), 5, 4)) \
+    .join(
+        accr_int_interbank,
+        on="segment_code",
+        how="inner"
+    ) \
+    .select("HEAD_CODE", "cgl") \
+    .distinct()
 
-        print(
-            f"Existing NOT FOUND record found for {output_date}. "
-            f"Updating it to PROCESSED."
-        )
 
-        update_query = f"""
-        UPDATE BGL_FILE_TRACKER
-        SET FILE_NAME = '{file_name}',
-            STATUS = 'PROCESSED',
-            ROW_COUNT = {total_row_count}
-        WHERE FILE_DATE = TO_DATE('{output_date}', 'DD-MON-RR')
-          AND STATUS = 'FILE NOT PRESENT'
-        """
+    # interbank_memo_cgl_map.show(10,False)
 
-        print(f"Executing Oracle update for {output_date}")
+    interbank_gl_memo_df = interbank_memo_cgl_map \
+    .join(gl_balance_table, on="cgl", how="inner") \
+    .groupBy("HEAD_CODE") \
+    .agg(F.sum("INR_BALANCE").alias("memo_balance"))
 
-        update_oracle(
-            spark,
-            update_query
-        )
 
-        print(
-            f"Existing NOT FOUND record updated successfully "
-            f"for {output_date}."
-        )
 
-    else:
+    interbank_summary_df = head_df \
+    .join(interbank_file_balance_df, on="HEAD_CODE", how="inner") \
+    .join(interbank_gl_memo_df, on="HEAD_CODE", how="left") \
+    .withColumn("file_balance", F.coalesce(F.col("file_balance"), F.lit(0.0))) \
+    .withColumn("memo_balance", F.coalesce(F.col("memo_balance"), F.lit(0.0))) \
+    .withColumn(
+        "total_balance",
+        F.when(F.col("FLAG") == "Y", F.col("file_balance") - F.col("memo_balance"))
+         .otherwise(F.col("file_balance"))
+    ) \
+        .filter(F.col("total_balance") != 0)
+    # interbank_summary_df.show(10,False)
 
-        # ======================================================
-        # FIRST TIME FILE IS BEING PROCESSED
-        # INSERT NEW RECORD
-        # ======================================================
+    
+    interbank_psv_df = interbank_summary_df.orderBy(F.col("HEAD_CODE").asc()).select(
+        F.col("HEAD_CODE").alias("NWSA_HEAD"),
+        F.col("HEAD_DESC").alias("DESCRIPTION"),
+        F.format_string("%.2f", F.col("total_balance")).alias("AMOUNT")
+    ).sort(col("HEAD_CODE"))
+    
+    filename_interbank = f"ACCR_INT_FILE_INTERBANK_{file_date}.psv"
 
-        print(
-            f"No previous NOT FOUND record for {output_date}. "
-            f"Inserting new PROCESSED record."
-        )
+    write_csv_with_filename(
+        df=interbank_psv_df,
+        output_dir=output_path,
+        filename=filename_interbank,
+        header=True,
+        sep="|"
+    )
+    
+    
+    interbank_rows = interbank_summary_df.orderBy(F.col("HEAD_CODE").asc()).select("HEAD_CODE", "HEAD_DESC", "total_balance").collect()
 
-        tracker_df = spark.createDataFrame(
-            [
-                (
-                    file_name,
-                    output_date,
-                    "PROCESSED",
-                    total_row_count
-                )
-            ],
-            [
-                "FILE_NAME",
-                "FILE_DATE",
-                "STATUS",
-                "ROW_COUNT"
-            ]
-        )
 
-        tracker_df.show(20, False)
+    interbank_header_lines = [
+        f"'{' '*48}STATE BANK OF INDIA\n",
+        f"{' '*49}000  INDIAN RUPEE\n",
+        f"  REPORT ON DAILY  ACCRUED INTEREST ON INTERBANK DEPOSIT AS ON  {as_on_date}{' '*8}RUN DATE : {run_date}\n\n",
+        "=" * 100 + "\n",
+        f"{'NWSA HEAD':<21}{'DESCRIPTION':<55}{'AMOUNT':>24}\n",
+        "=" * 100 + "\n"
+    ]
+    
+    interbank_body_lines = [
+        f"{str(r['HEAD_CODE'] or ''):<21}{str(r['HEAD_DESC'] or ''):<55}{float(r['total_balance'] or 0.0):>24.2f}\n"
+        for r in interbank_rows
+    ]
+    
+    interbank_report_df = spark.createDataFrame(
+        [("".join(interbank_header_lines) + "".join(interbank_body_lines) + "=" * 100 + "\n",)],
+        ["value"]
+    )
+    
+    write_csv_with_filename(
+        df=interbank_report_df,
+        output_dir=output_path,
+        filename=f"ACCR_INT_REPORT_INTERBANK{file_date}.txt",
+        header=False
+    )
 
-        write_oracle(
-            tracker_df,
-            "BGL_FILE_TRACKER"
-        )
 
-        print(
-            f"{file_name} tracker record inserted."
-        )
-
-except Exception as e:
-
-    print(f"Error {e} processing tracker")
-    spark.stop()
-    sys.exit()
+if __name__ == "__main__":
+   
+    BASE_HDFS = get_hdfs_base()
+    spark = create_spark_session("accrued_int", BASE_HDFS)
+    etl_date = get_etl_date(spark)
+    # etl_date = datetime(2026,9,1).date()
+    try:
+        main(spark,BASE_HDFS,etl_date)
+    except Exception as e:
+        print(f"Error {e} occured. ")
