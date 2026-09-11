@@ -1,334 +1,795 @@
-# BGL PIPELINE
-
-import re
+```python
+import datetime
 import sys
-import os
-from datetime import datetime, timedelta
+import re
+import builtins
+import concurrent.futures
+
+from datetime import date, timedelta, datetime
 from pathlib import Path
+
 from py4j.java_gateway import java_import
-from pyspark.sql.functions import col,split,substring,concat,regexp_replace,when,length,lit,count,substring,sum
+
+from pyspark.sql import SparkSession, functions as F
+import pyspark.sql.types as T
+from pyspark.sql import Row
+
+from pyspark.sql.functions import (
+    col,
+    substring,
+    when,
+    round as spark_round,
+    coalesce,
+    lit,
+    to_date,
+    expr,
+    round,
+    lower,
+    length,
+    count,
+    trim,
+    concat,
+    create_map,
+    to_timestamp,
+    sum,
+    broadcast,
+    current_timestamp,
+    first,
+    desc
+)
+
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    IntegerType,
+    DateType,
+    DecimalType,
+    LongType,
+    TimestampType
+)
+
 from delta.tables import DeltaTable
-from common.createSpark import create_spark_session
-from common.fileUtil import get_hdfs_base
-from common.fileUtil import paths_for_read
+
+
+# ==========================================================
+# COMMON METHODS
+# ==========================================================
+
+from common.properties import get_oracle_properties
 from common.dateUtil import get_etl_date
-from common.processRun import get_process_run_id
-from common.processRun import get_run_id
-from common.constants import Process
-from common.logger import setup_logger
-# from common.log_etl_modified import log_etl
+from common.createSpark import create_spark_session
+from common.fileUtil import get_hdfs_base, write_csv_with_filename
 from common.create_path_if_not_exists import create_path_if_not_exists
-from common.read_write_oracle import read_oracle, write_oracle
+
+# log_etl related imports
+from common.processRun import get_process_run_id
+from common.constants import Process
+from common.log_etl_modified import log_etl
 
 
 # ==========================================================
-# GET LAST PROCESSED DATE
+# ORACLE PROPERTIES
 # ==========================================================
-def get_last_processed_date(spark):
 
-    query = """
-    (
-        SELECT MAX(FILE_DATE) AS LAST_PROCESSED_DATE
-        FROM BGL_FILE_TRACKER
-        WHERE STATUS='PROCESSED'
-    )
+oracle_properties = get_oracle_properties()
+
+oracle_url = oracle_properties["url"]
+oracle_user = oracle_properties["user"]
+oracle_password = oracle_properties["password"]
+oracle_driver = oracle_properties["driver"]
+
+
+# ==========================================================
+# READ ORACLE
+# ==========================================================
+
+def read_oracle(spark, query_or_table):
     """
-    # print("===========================Before oracle read==========================")
-    tracker_df = read_oracle(spark, query)
-    # print("===========================After oracle read==========================")
-    row = tracker_df.collect()[0]
-    return row["LAST_PROCESSED_DATE"]
-
-
-# ==========================================================
-# CHECK IF FILE ALREADY PROCESSED
-# ==========================================================
-
-def is_processed(spark, file_name):
-
-    query = f"""
-    (
-        SELECT COUNT(*) CNT
-        FROM BGL_FILE_TRACKER
-        WHERE FILE_NAME='{file_name}'
-        AND STATUS='PROCESSED'
-    )
+    Reads a table or query from Oracle DB using JDBC.
     """
-    tracker_df = read_oracle(spark, query)
-    return tracker_df.collect()[0]["CNT"] > 0
-
-
-# ==========================================================
-# MAIN_PIPELINE
-# ==========================================================
-try:
-    PROCESS_ID = Process.CBS_ALL_DATA
-    HDFS_BASE = get_hdfs_base()
-    print(f"HDFS_BASE: {HDFS_BASE}")
-    spark = create_spark_session("BGL_PIPELINE", HDFS_BASE)
-
-    today = get_etl_date(spark)
-    posting_date_str = today.strftime("%d-%m-%Y")
-    today_str = posting_date_str
-
-    process_run_id = (
-        sys.argv[1] if len(sys.argv) > 1
-        else get_process_run_id(spark, PROCESS_ID, posting_date_str)
-    )
-    run_id = 1 
-    
-
-    print("====================================================")
-    print("BGL Pipeline Started")
-    print("====================================================")
-    #log_etl(spark,process_run_id,"bgl_pipeline",1,"BGL pipeline started") 
-
-    print(f"Process ID            : {PROCESS_ID}")
-    print(f"HDFS Base Path        : {HDFS_BASE}")
-
-    # ==========================================================
-    # GET LAST PROCESSED DATE
-    # ==========================================================
-    print("Fetching Last Processed Date from BGL_FILE_TRACKER.")
-    last_processed_date = get_last_processed_date(spark)
-    print(f"ETL Date              : {today}") #31st march
-    print(f"Last Processed Date   : {last_processed_date}") #none
-
-    if last_processed_date is None:
-        print(
-            "No previously processed records found. "
-            "Pipeline will start from the ETL Date."
-        )
-        from_date = today #31st march
-    else:
-        from_date = last_processed_date + timedelta(days=1)
-    
-    to_date = today #31st march
-    
-    print(f"From Date             : {from_date}") #31st march
-    print(f"To Date               : {to_date}") #31st march
-
-    # ==========================================================
-    # VALIDATE ETL DATE
-    # ==========================================================
-    if last_processed_date is not None and today <= last_processed_date:
-        print(
-            f"Invalid ETL Date. ETL Date ({today}) must be greater than "
-            f"the Last Processed Date ({last_processed_date})."
-        )
-
-        print(
-            "ETL Date should always be ahead of the Last Processed Date. "
-            "Pipeline execution cannot continue."
-        )
-
-        raise Exception(
-            "ETL Date should always be ahead of the Last Processed Date."
-        )
-
-    print("Date validation completed successfully.")
-    print(f"Pipeline will process files from {from_date} to {to_date}.")
-
-    # ==========================================================
-    # HDFS
-    # ==========================================================  
-    java_import(spark._jvm, "org.apache.hadoop.fs.FileSystem")
-    java_import(spark._jvm, "org.apache.hadoop.fs.Path")
-    fs = spark._jvm.FileSystem.get(spark._jsc.hadoopConfiguration())
-
-    current_date = from_date #31st march
-    
-    while current_date <= to_date: #31st march <= 31st march
-        folder_date = current_date.strftime("%d-%m-%Y") #31st march
-
-
-        input_folder = f"{HDFS_BASE}/CBS-FILES/31-01-2026/misc"
-        # input_folder = f"{HDFS_BASE}/CBS-FILES/{folder_date}/misc"
-        
-    
-        # print(f"\nChecking folder : {input_folder}")
-        print(f"\nChecking folder : {input_folder}")
-        path = spark._jvm.Path(input_folder)
-    
-        # ======================================================
-        # FOLDER NOT PRESENT
-        # ======================================================
-        if not fs.exists(path):
-            print(f"{folder_date} folder not present.") #31st march
-            tracker_df = spark.createDataFrame([("NULL", current_date, "FILE_NOT_PRESENT")],["FILE_NAME", "FILE_DATE", "STATUS"])
-            # tracker_df.show(20,False)
-            write_oracle(tracker_df, "BGL_FILE_TRACKER") #31st march
-
-            current_date += timedelta(days=1) #1st april
-            print(current_date) #1st april
-            continue
-    
-        # ======================================================
-        # GET FILES
-        # ======================================================
-        files = fs.listStatus(path)
-        print(f"Files found : {len(files)}")
-
-        # ======================================================
-        # DATALAKE PATH
-        # ======================================================
-        year = current_date.strftime("%Y")
-        month = current_date.strftime("%b").upper()
-        day = current_date.strftime("%d")
-    
-        output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/BANCS24/BGL")
-        summary_output_path = (f"{HDFS_BASE}/druid-data-lake/{year}/{month}/{day}/PRODUCT_WISE/datalake")
-        create_path_if_not_exists(spark, output_path)
-        create_path_if_not_exists(spark, summary_output_path)
-    
-        # ======================================================
-        # LOOP THROUGH FILES
-        # ======================================================
-        for file_status in files:
-            if file_status.isDirectory():
-                continue
-    
-            file_name = file_status.getPath().getName()
-            if not file_name.startswith("BGL_Ext_"):
-                continue
-    
-            input_path = file_status.getPath().toString()
-        
-            print(f"Processing : {file_name}")
-    
-            if is_processed(spark, file_name):
-                print(f"{file_name} already processed.")
-                continue
-    
-            try:
-                # ==================================================
-                # READ FILE
-                # ==================================================
-                file_df = spark.read.format("text").load(input_path)
-                file_df.show(20, False)
-
-
-                parts = split(col("value"), r"\|")
-    
-                # ==================================================
-                # PARSE FILE
-                # ==================================================
-    
-                parsed_df = file_df.select(
-                    concat(substring(parts.getItem(0), 8, 7),parts.getItem(1)).alias("ACCOUNT_NO"),
-                    parts.getItem(1).alias("BRANCH_CODE"),
-                    parts.getItem(2).alias("PRODUCT"),
-                    parts.getItem(3).alias("SEGMENT"),
-                    parts.getItem(4).alias("AMOUNT"),
-                    parts.getItem(5).alias("GLCC"),
-                    parts.getItem(6).alias("ACCOUNT_NAME"),
-                    when(regexp_replace(parts.getItem(7), "^0+", "") == "","0").otherwise(regexp_replace(parts.getItem(7), "^0+", "")).alias("STATUS")
-                )
-                # parsed_df.cache()
-                l = parsed_df.count()
-                print(f"Rows parsed from {file_name} :{l} ")
-                
-                parsed_df.show(200, False)
-    
-                # ==================================================
-                # WRITE TO DELTA
-                # ==================================================
-    
-                # parsed_df.write \
-                #     .format("delta") \
-                #     .mode("append") \
-                #     .save(output_path)
-    
-                print(f"{file_name} written successfully.")
-                
-
-                try:
-
-                    type_name = file_name.split("_")[0].upper()
-                    file_date = datetime.strptime(
-                        file_name.split("_")[2],
-                        "%d%m%Y").strftime("%d-%m-%Y")
-                    
-                    summary_df = (parsed_df.withColumn("CGL",substring(col("GLCC"),9,10)).withColumn("CURRENCY",substring(col("GLCC"),6,3)).withColumn("TYPE",lit(type_name)).withColumn("DATE",lit(file_date)).withColumn("AMOUNT",col("AMOUNT").cast("decimal(20,2)")).groupBy("CGL","CURRENCY","PRODUCT","TYPE","DATE").agg(sum("AMOUNT").alias("BALANCE")).select("CGL","CURRENCY","PRODUCT","BALANCE","TYPE","DATE"))
-                    
-                    # summary_count = summary_df.count()
-                    summary_df.show(200, False)
-                    print("Summary dataframe created.")
-                    # print(f"Summary records created : {summary_count}")
-
-
-                    if(run_id>1):
-                        print(f"Rerun detected (Run id: {run_id}). "
-                                    f"Deleting existing {type_name} for {file_date}")
-                        delta_table = DeltaTable.forPath(spark, summary_output_path)
-                        delta_table.delete(f"TYPE = '{type_name}' AND DATE = '{file_date}'")
-                        print("Existing summary records deleted successfully.")
-
-
-                    # summary_df.write \
-                    #     .format("delta") \
-                    #     .mode("append") \
-                    #     .save(summary_output_path)
-                    
-                    print(f"Summary written successfully."
-                                f"{type_name} - {file_date}")
-        
-                except Exception as e:
-
-                    print(f"Error processing SUMMARY DF")
-                    spark.stop()
-                    sys.exit()
-
-
-                # ==================================================
-                # UPDATE TRACKER TABLE
-                # ==================================================
-                try:
-
-                    tracker_df = spark.createDataFrame([(file_name,current_date,"PROCESSED",l)],["FILE_NAME","FILE_DATE","STATUS","ROW_COUNT"])
-                    write_oracle(tracker_df,"BGL_FILE_TRACKER")
-                    print(f"{file_name} tracker updated.")
-            
-                except Exception as e:
-
-                    print(f"Error processing tracker df===============================")
-                    spark.stop()
-                    sys.exit()
-
-    
-            except Exception as e:
-
-                print(f"Error processing {file_name}")
-                print("Exception occured while processing the file.")
-
-                tracker_df = spark.createDataFrame([(file_name,current_date,"FAILED")],["FILE_NAME","FILE_DATE","STATUS"])
-                write_oracle(tracker_df,"BGL_FILE_TRACKER")
-
-        # ======================================================
-        # MOVE TO NEXT DATE
-        # ======================================================
-        current_date += timedelta(days=1)
-
-    print("==========================================")
-    print("BGL Processing Completed Successfully")
-    print("==========================================")
-    #log_etl(spark,process_run_id,"bgl_pipeline",2,f"BGL pipeline completed successfully.")
-
-except Exception as e:
-    error_message = str(e)
-    print("BGL Pipeline Failed")
-    #log_etl(spark, process_run_id, "bgl_pipeline", 3, error_message)
-    raise
-
-finally:
 
     try:
-        print("Stopping Spark Session")
-        spark.stop()
-        print("Stopped Spark Session")
-    except:
-        pass
+
+        dbtable_val = (
+            f"({query_or_table}) src"
+            if " " in query_or_table.strip()
+            else query_or_table
+        )
+
+        return (
+            spark.read.format("jdbc")
+            .option("url", oracle_url)
+            .option("dbtable", dbtable_val)
+            .option("user", oracle_user)
+            .option("password", oracle_password)
+            .option("driver", oracle_driver)
+            .option("fetchsize", "10000")
+            .load()
+        )
+
+    except Exception as e:
+
+        print("Oracle read error:", str(e))
+        raise e
 
 
+# ==========================================================
+# MAIN PIPELINE
+# ==========================================================
 
+def main(spark, hdfs, etl_date):
 
+    print("====================================================")
+    print("ACCRUED INTEREST PIPELINE STARTED")
+    print("====================================================")
+
+    # ======================================================
+    # DATE PREPARATION
+    # ======================================================
+
+    date_str = etl_date.strftime("%Y-%m-%d")
+    date_var = etl_date.strftime("%d-%m-%Y")
+    file_date = etl_date.strftime("%Y%m%d")
+
+    print(f"ETL Date              : {etl_date}")
+    print(f"Date String           : {date_str}")
+    print(f"Date Variable         : {date_var}")
+    print(f"File Date             : {file_date}")
+
+    date_obj = datetime.strptime(date_var, "%d-%m-%Y")
+
+    print(f"Date Object           : {date_obj}")
+
+    output_date = date_obj.strftime("%d-%b-%y").upper()
+
+    print(f"Oracle Balance Date   : {output_date}")
+
+    # ======================================================
+    # INPUT / OUTPUT PATH
+    # ======================================================
+
+    path = f"{hdfs}/CBS-FILES/{date_var}/misc/CON*"
+
+    output_path = (
+        f"{hdfs}/reports/{date_str}/CONSOLIDATED-DEPOSITS-FILES/"
+    )
+
+    print(f"Input Path            : {path}")
+    print(f"Output Path           : {output_path}")
+
+    # ======================================================
+    # READ CONSOLIDATED DEPOSITS FILE
+    # ======================================================
+
+    print("====================================================")
+    print("Reading Consolidated Deposits File")
+    print("====================================================")
+
+    raw_df = (
+        spark.read
+        .option("header", "false")
+        .csv(path)
+        .toDF("glcc", "amount")
+    )
+
+    raw_count = raw_df.count()
+
+    print(f"Raw records read      : {raw_count}")
+
+    # ======================================================
+    # PARSE INPUT FILE
+    # ======================================================
+
+    print("====================================================")
+    print("Parsing Consolidated Deposits Data")
+    print("====================================================")
+
+    parsed_df = (
+        raw_df
+        .withColumn(
+            "branch_code",
+            F.substring(F.col("glcc"), 1, 5)
+        )
+        .withColumn(
+            "currency_code",
+            F.substring(F.col("glcc"), 6, 3)
+        )
+        .withColumn(
+            "cgl",
+            F.substring(F.col("glcc"), 9, 10)
+        )
+        .withColumn(
+            "segment_code",
+            F.substring(F.col("glcc"), 13, 4)
+        )
+        .withColumn(
+            "amount",
+            F.col("amount").cast("decimal(18, 4)")
+        )
+    )
+
+    parsed_count = parsed_df.count()
+
+    print(f"Parsed records        : {parsed_count}")
+
+    # ======================================================
+    # READ MASTER TABLES
+    # ======================================================
+
+    print("====================================================")
+    print("Reading Oracle Master Tables")
+    print("====================================================")
+
+    print("Reading BRANCH_MASTER")
+
+    branch_master = read_oracle(
+        spark,
+        "SELECT CODE AS BRANCH_CODE FROM BRANCH_MASTER"
+    )
+
+    print("BRANCH_MASTER read successfully.")
+
+    print("Reading CGL_MASTER")
+
+    cgl_master = read_oracle(
+        spark,
+        "SELECT CGL_NUMBER AS cgl FROM CGL_MASTER"
+    )
+
+    print("CGL_MASTER read successfully.")
+
+    print("Reading CURRENCY_MASTER")
+
+    currency_master = read_oracle(
+        spark,
+        "SELECT CURRENCY_CODE, CURRENCY_RATE FROM CURRENCY_MASTER"
+    )
+
+    print("CURRENCY_MASTER read successfully.")
+
+    # ======================================================
+    # VALIDATE DATA
+    # ======================================================
+
+    print("====================================================")
+    print("Validating Consolidated Deposits Data")
+    print("====================================================")
+
+    validated_df = (
+        parsed_df
+        .join(
+            F.broadcast(branch_master),
+            on="branch_code",
+            how="inner"
+        )
+        .join(
+            F.broadcast(cgl_master),
+            on="cgl",
+            how="inner"
+        )
+        .join(
+            F.broadcast(currency_master),
+            on="currency_code",
+            how="left"
+        )
+    )
+
+    validated_count = validated_df.count()
+
+    print(f"Validated records     : {validated_count}")
+
+    # ======================================================
+    # CALCULATE FINAL AMOUNT
+    # ======================================================
+
+    print("====================================================")
+    print("Calculating Final Amount")
+    print("====================================================")
+
+    result_df = (
+        validated_df
+        .withColumn(
+            "effective_rate",
+            F.when(
+                F.col("currency_code") == "INR",
+                F.lit(1.0)
+            ).otherwise(
+                F.coalesce(
+                    F.col("currency_rate"),
+                    F.lit(1.0)
+                )
+            )
+        )
+        .withColumn(
+            "final_amount",
+            F.round(
+                F.col("amount") * F.col("effective_rate"),
+                2
+            )
+        )
+    )
+
+    result_df = result_df.cache()
+
+    result_count = result_df.count()
+
+    print(f"Result records        : {result_count}")
+
+    # ======================================================
+    # READ ACCRUED INTEREST MASTER TABLES
+    # ======================================================
+
+    print("====================================================")
+    print("Reading Accrued Interest Master Tables")
+    print("====================================================")
+
+    print("Reading ACCR_INT_HEADS")
+
+    accr_int_heads = read_oracle(
+        spark,
+        "SELECT HEAD_CODE, FLAG FROM ACCR_INT_HEADS"
+    )
+
+    print("ACCR_INT_HEADS read successfully.")
+
+    print("Reading RB_PARSED_TEMPLATE")
+
+    rb_parsed_table = read_oracle(
+        spark,
+        """
+        SELECT HEAD_CODE, HEAD_DESC, CGL AS cgl
+        FROM RB_PARSED_TEMPLATE
+        """
+    )
+
+    print("RB_PARSED_TEMPLATE read successfully.")
+
+    print("Reading GL_BALANCE")
+
+    gl_balance_table = read_oracle(
+        spark,
+        f"""
+        SELECT CGL, INR_BALANCE
+        FROM GL_BALANCE
+        WHERE BALANCE_DATE = '{output_date}'
+        AND CGL LIKE '5%'
+        """
+    )
+
+    print("GL_BALANCE read successfully.")
+
+    # ======================================================
+    # CREATE HEAD-CGL MAP
+    # ======================================================
+
+    print("====================================================")
+    print("Creating Head-CGL Mapping")
+    print("====================================================")
+
+    head_cgl_map = (
+        F.broadcast(accr_int_heads)
+        .join(
+            rb_parsed_table,
+            on="HEAD_CODE",
+            how="inner"
+        )
+    )
+
+    head_cgl_map.show(10, False)
+
+    head_cgl_map = head_cgl_map.cache()
+
+    head_map_count = head_cgl_map.count()
+
+    print(f"Head-CGL mapping rows : {head_map_count}")
+
+    head_df = (
+        head_cgl_map
+        .select(
+            "HEAD_CODE",
+            "FLAG",
+            "HEAD_DESC"
+        )
+        .distinct()
+    )
+
+    head_df = head_df.cache()
+
+    head_count = head_df.count()
+
+    print(f"Distinct heads        : {head_count}")
+
+    # ======================================================
+    # FILE BALANCE
+    # ======================================================
+
+    print("====================================================")
+    print("Calculating File Balance")
+    print("====================================================")
+
+    file_balance_df = (
+        head_cgl_map
+        .join(
+            result_df,
+            on="cgl",
+            how="inner"
+        )
+        .groupBy("HEAD_CODE")
+        .agg(
+            F.sum("final_amount").alias("file_balance")
+        )
+    )
+
+    file_balance_count = file_balance_df.count()
+
+    print(f"File balance heads    : {file_balance_count}")
+
+    # ======================================================
+    # GL MEMO BALANCE
+    # ======================================================
+
+    print("====================================================")
+    print("Calculating GL Memo Balance")
+    print("====================================================")
+
+    gl_memo_df = (
+        head_cgl_map
+        .join(
+            gl_balance_table,
+            on="cgl",
+            how="inner"
+        )
+        .groupBy("HEAD_CODE")
+        .agg(
+            F.sum("INR_BALANCE").alias("memo_balance")
+        )
+    )
+
+    gl_memo_count = gl_memo_df.count()
+
+    print(f"Memo balance heads    : {gl_memo_count}")
+
+    # ======================================================
+    # FINAL SUMMARY
+    # ======================================================
+
+    print("====================================================")
+    print("Creating Final Summary")
+    print("====================================================")
+
+    final_summary_df = (
+        head_df
+        .join(
+            file_balance_df,
+            on="HEAD_CODE",
+            how="left"
+        )
+        .join(
+            gl_memo_df,
+            on="HEAD_CODE",
+            how="left"
+        )
+        .withColumn(
+            "file_balance",
+            F.coalesce(
+                F.col("file_balance"),
+                F.lit(0.0)
+            )
+        )
+        .withColumn(
+            "memo_balance",
+            F.coalesce(
+                F.col("memo_balance"),
+                F.lit(0.0)
+            )
+        )
+        .withColumn(
+            "total_balance",
+            F.when(
+                F.col("FLAG") == "Y",
+                F.col("file_balance") - F.col("memo_balance")
+            ).otherwise(
+                F.col("file_balance")
+            )
+        )
+        .filter(
+            F.col("total_balance") != 0
+        )
+    )
+
+    final_summary_count = final_summary_df.count()
+
+    print(
+        f"Final summary records: {final_summary_count}"
+    )
+
+    # ======================================================
+    # PSV OUTPUT
+    # ======================================================
+
+    print("====================================================")
+    print("Creating Accrued Interest PSV File")
+    print("====================================================")
+
+    psv_export_df = (
+        final_summary_df
+        .orderBy(F.col("HEAD_CODE").asc())
+        .select(
+            F.col("HEAD_CODE").alias("NWSA_HEAD"),
+            F.col("HEAD_DESC").alias("DESCRIPTION"),
+            F.format_string(
+                "%.2f",
+                F.col("total_balance")
+            ).alias("AMOUNT")
+        )
+        .orderBy(col("HEAD_CODE").asc())
+    )
+
+    create_path_if_not_exists(
+        spark,
+        output_path
+    )
+
+    print("Output path created/verified.")
+
+    filename = (
+        f"ACCR_INT_FILE_FINCORE_{file_date}.psv"
+    )
+
+    print(f"Writing PSV file       : {filename}")
+
+    write_csv_with_filename(
+        df=psv_export_df,
+        output_dir=output_path,
+        filename=filename,
+        header=True,
+        sep="|"
+    )
+
+    print(
+        f"PSV file created successfully: {filename}"
+    )
+
+    # ======================================================
+    # ACCRUED INTEREST TXT REPORT
+    # ======================================================
+
+    print("====================================================")
+    print("Creating Accrued Interest TXT Report")
+    print("====================================================")
+
+    as_on_date = date_str
+    run_date = etl_date.strftime("%d%m%Y")
+
+    rows = (
+        final_summary_df
+        .select(
+            "HEAD_CODE",
+            "HEAD_DESC",
+            "total_balance"
+        )
+        .collect()
+    )
+
+    print(
+        f"Rows collected for report: {len(rows)}"
+    )
+
+    header_lines = [
+        f"'{' ' * 48}STATE BANK OF INDIA\n",
+        f"{' ' * 49}000  INDIAN RUPEE\n",
+        f"     REPORT ON DAILY  ACCRUED INTEREST ON DEPOSIT (NDTL) AS ON  "
+        f"{as_on_date}{' ' * 8}RUN DATE:{run_date}\n\n",
+        "=" * 100 + "\n",
+        f"{'NWSA HEAD':<21}{'DESCRIPTION':<55}{'AMOUNT':>24}\n",
+        "=" * 100 + "\n"
+    ]
+
+    body_lines = [
+        f"{str(r['HEAD_CODE'] or ''):<21}"
+        f"{str(r['HEAD_DESC'] or ''):<55}"
+        f"{float(r['total_balance'] or 0.0):>24.2f}\n"
+        for r in rows
+    ]
+
+    report_df = spark.createDataFrame(
+        [
+            (
+                "".join(header_lines)
+                + "".join(body_lines)
+                + "=" * 100
+                + "\n",
+            )
+        ],
+        ["value"]
+    )
+
+    report_filename = (
+        f"ACCR_INT_REPORT_{file_date}.txt"
+    )
+
+    print(
+        f"Writing TXT report     : {report_filename}"
+    )
+
+    write_csv_with_filename(
+        df=report_df,
+        output_dir=output_path,
+        filename=report_filename,
+        header=False
+    )
+
+    print(
+        f"TXT report created successfully: {report_filename}"
+    )
+
+    # ======================================================
+    # INTERBANK REPORT PIPELINE
+    # ======================================================
+
+    print("====================================================")
+    print("INTERBANK REPORT PIPELINE STARTED")
+    print("====================================================")
+
+    print("Reading ACCR_INT_INTERBANK")
+
+    accr_int_interbank = read_oracle(
+        spark,
+        "ACCR_INT_INTERBANK"
+    )
+
+    print(
+        "ACCR_INT_INTERBANK read successfully."
+    )
+
+    # ======================================================
+    # INTERBANK RESULT
+    # ======================================================
+
+    print("Creating Interbank Result DataFrame")
+
+    interbank_result_df = result_df.join(
+        accr_int_interbank.select(
+            F.col("SEGMENT_CODE").alias("segment_code")
+        ),
+        on="segment_code",
+        how="inner"
+    )
+
+    interbank_result_count = (
+        interbank_result_df.count()
+    )
+
+    print(
+        f"Interbank result records: "
+        f"{interbank_result_count}"
+    )
+
+    # ======================================================
+    # INTERBANK FILE BALANCE
+    # ======================================================
+
+    print("Calculating Interbank File Balance")
+
+    interbank_file_balance_df = (
+        head_cgl_map
+        .join(
+            interbank_result_df,
+            on="cgl",
+            how="inner"
+        )
+        .groupBy("HEAD_CODE")
+        .agg(
+            F.sum("final_amount").alias(
+                "file_balance"
+            )
+        )
+    )
+
+    interbank_file_balance_count = (
+        interbank_file_balance_df.count()
+    )
+
+    print(
+        f"Interbank file balance heads: "
+        f"{interbank_file_balance_count}"
+    )
+
+    # ======================================================
+    # INTERBANK MEMO CGL MAP
+    # ======================================================
+
+    print("Creating Interbank Memo CGL Mapping")
+
+    interbank_memo_cgl_map = (
+        head_cgl_map
+        .filter(
+            F.col("cgl").startswith("5")
+        )
+        .withColumn(
+            "segment_code",
+            F.substring(
+                F.col("cgl"),
+                5,
+                4
+            )
+        )
+        .join(
+            accr_int_interbank,
+            on="segment_code",
+            how="inner"
+        )
+        .select(
+            "HEAD_CODE",
+            "cgl"
+        )
+        .distinct()
+    )
+
+    interbank_memo_map_count = (
+        interbank_memo_cgl_map.count()
+    )
+
+    print(
+        f"Interbank memo CGL rows: "
+        f"{interbank_memo_map_count}"
+    )
+
+    # ======================================================
+    # INTERBANK GL MEMO
+    # ======================================================
+
+    print("Calculating Interbank GL Memo Balance")
+
+    interbank_gl_memo_df = (
+        interbank_memo_cgl_map
+        .join(
+            gl_balance_table,
+            on="cgl",
+            how="inner"
+        )
+        .groupBy("HEAD_CODE")
+        .agg(
+            F.sum("INR_BALANCE").alias(
+                "memo_balance"
+            )
+        )
+    )
+
+    interbank_gl_memo_count = (
+        interbank_gl_memo_df.count()
+    )
+
+    print(
+        f"Interbank memo balance heads: "
+        f"{interbank_gl_memo_count}"
+    )
+
+    # ======================================================
+    # INTERBANK FINAL SUMMARY
+    # ======================================================
+
+    print("Creating Interbank Final Summary")
+
+    interbank_summary_df = (
+        head_df
+        .join(
+            interbank_file_balance_df,
+            on="HEAD_CODE",
+            how="inner"
+        )
+        .join(
+            interbank_gl_memo_df,
+            on="HEAD_CODE",
+            how="left"
+        )
+        .withColumn(
+            "file_balance",
+            F.coalesce(
+                F.col("file_balance"),
+                F.lit(0.0)
+            )
+        )
+        .withColumn(
+ 
