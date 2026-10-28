@@ -1,73 +1,24 @@
-{/* Selected filter summary after search */}
-{searchPerformed && !filtersExpanded && (
-  <Stack
-    direction="row"
-    spacing={1}
-    useFlexGap
-    flexWrap="wrap"
-    sx={{ mb: 1.5 }}
+{!filtersExpanded && (
+  <Box
+    sx={{
+      display: "flex",
+      justifyContent: "flex-end",
+      mb: 1,
+    }}
   >
-    {filters.branches?.length > 0 && (
-      <Chip
-        size="small"
-        label={`Branch: ${
-          filters.branches.includes("ALL")
-            ? "All Branches"
-            : filters.branches.join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
-
-    {filters.circle && (
-      <Chip
-        size="small"
-        label={`Circle: ${filters.circle}`}
-        variant="outlined"
-      />
-    )}
-
-    {filters.cgl && (
-      <Chip
-        size="small"
-        label={`CGL: ${filters.cgl}`}
-        variant="outlined"
-      />
-    )}
-
-    {filters.currencies?.length > 0 && (
-      <Chip
-        size="small"
-        label={`Currency: ${
-          filters.currencies.includes("ALL")
-            ? "All Currencies"
-            : filters.currencies.join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
-
-    {filters.fromDate?.isValid?.() &&
-      filters.toDate?.isValid?.() && (
-        <Chip
-          size="small"
-          label={`Date: ${filters.fromDate.format(
-            "DD-MM-YYYY"
-          )} - ${filters.toDate.format("DD-MM-YYYY")}`}
-          variant="outlined"
-        />
-      )}
-
-    {filters.sourceFlags?.length > 0 && (
-      <Chip
-        size="small"
-        label={`Transaction Type: ${
-          filters.sourceFlags.length === sourceOptions.length
-            ? "All Types"
-            : filters.sourceFlags.map((item) => item.flagName).join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
-  </Stack>
+    <Button
+      variant="outlined"
+      startIcon={<VisibilityIcon />}
+      onClick={() => setFiltersExpanded(true)}
+      sx={{
+        borderRadius: 2,
+        textTransform: "none",
+        fontWeight: 700,
+        color: "#58469f",
+        borderColor: "#58469f",
+      }}
+    >
+      Edit Filters
+    </Button>
+  </Box>
 )}
