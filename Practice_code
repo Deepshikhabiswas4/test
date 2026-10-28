@@ -1,50 +1,73 @@
-<Stack
-  direction="row"
-  alignItems="center"
-  justifyContent="space-between"
-  sx={{ mb: 2 }}
->
-  <Stack direction="row" spacing={1} alignItems="center">
-    <Box
-      sx={{
-        p: 0.5,
-        bgcolor: "primary.main",
-        borderRadius: 1,
-        color: "white",
-        display: "flex",
-      }}
-    >
-      <SearchIcon fontSize="small" />
-    </Box>
-
-    <Typography
-      variant="subtitle2"
-      sx={{
-        fontWeight: 800,
-        color: "text.primary",
-        letterSpacing: 1,
-      }}
-    >
-      Account Details
-    </Typography>
-  </Stack>
-
-  <Button
-    variant="contained"
-    size="small"
-    startIcon={<ManageSearchOutlinedIcon />}
-    onClick={onToggleFilters}
-    sx={{
-      textTransform: "none",
-      borderRadius: "8px",
-      fontWeight: 600,
-      bgcolor: "#58469f",
-      whiteSpace: "nowrap",
-      "&:hover": {
-        bgcolor: "#45357a",
-      },
-    }}
+{/* Selected filter summary after search */}
+{searchPerformed && !filtersExpanded && (
+  <Stack
+    direction="row"
+    spacing={1}
+    useFlexGap
+    flexWrap="wrap"
+    sx={{ mb: 1.5 }}
   >
-    {filtersExpanded ? "Hide Filters" : "Edit Filters"}
-  </Button>
-</Stack>
+    {filters.branches?.length > 0 && (
+      <Chip
+        size="small"
+        label={`Branch: ${
+          filters.branches.includes("ALL")
+            ? "All Branches"
+            : filters.branches.join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
+
+    {filters.circle && (
+      <Chip
+        size="small"
+        label={`Circle: ${filters.circle}`}
+        variant="outlined"
+      />
+    )}
+
+    {filters.cgl && (
+      <Chip
+        size="small"
+        label={`CGL: ${filters.cgl}`}
+        variant="outlined"
+      />
+    )}
+
+    {filters.currencies?.length > 0 && (
+      <Chip
+        size="small"
+        label={`Currency: ${
+          filters.currencies.includes("ALL")
+            ? "All Currencies"
+            : filters.currencies.join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
+
+    {filters.fromDate?.isValid?.() &&
+      filters.toDate?.isValid?.() && (
+        <Chip
+          size="small"
+          label={`Date: ${filters.fromDate.format(
+            "DD-MM-YYYY"
+          )} - ${filters.toDate.format("DD-MM-YYYY")}`}
+          variant="outlined"
+        />
+      )}
+
+    {filters.sourceFlags?.length > 0 && (
+      <Chip
+        size="small"
+        label={`Transaction Type: ${
+          filters.sourceFlags.length === sourceOptions.length
+            ? "All Types"
+            : filters.sourceFlags.map((item) => item.flagName).join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
+  </Stack>
+)}
