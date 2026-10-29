@@ -1,159 +1,72 @@
-l
-{!filtersExpanded && (
-  <Card
+{/* Selected filter summary after search */}
+{searchPerformed && !filtersExpanded && (
+  <Stack
+    direction="row"
+    spacing={1}
+    useFlexGap
+    flexWrap="wrap"
     sx={{
-      mb: 2,
-      borderRadius: "20px",
-      border: "1px solid rgba(88, 70, 159, 0.15)",
-      boxShadow: "0 8px 24px rgba(0, 0, 0, 0.06)",
-      background: "rgba(255, 255, 255, 0.65)",
+      mb: 1.5,
+      alignItems: "center",
+      width: "100%",
     }}
   >
-    <CardContent sx={{ p: { xs: 2, sm: 2.5 } }}>
-      <Stack
-        direction={{ xs: "column", md: "row" }}
-        justifyContent="space-between"
-        alignItems={{ xs: "stretch", md: "center" }}
-        spacing={2}
-      >
-        <Box sx={{ minWidth: 0, flex: 1 }}>
-          <Typography
-            variant="h6"
-            sx={{
-              fontWeight: 800,
-              color: "#30235f",
-              mb: 0.5,
-            }}
-          >
-            Ledger Balance Insights
-          </Typography>
+    {filters.branches?.length > 0 && (
+      <Chip
+        size="small"
+        label={`Branch: ${
+          filters.branches.includes("All Branches")
+            ? "All Branches"
+            : filters.branches.join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
 
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            sx={{ mb: 1.5 }}
-          >
-            Ledger Balance search and analysis
-          </Typography>
+    {filters.circle && (
+      <Chip
+        size="small"
+        label={`Circle: ${
+          filters.circle === CIRCLE_GROUPS.ALL
+            ? "All Circles"
+            : filters.circle
+        }`}
+        variant="outlined"
+      />
+    )}
 
-          <Box
-            sx={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 1,
-              alignItems: "center",
-            }}
-          >
-            <Chip
-              size="small"
-              label={`Enquiry: ${
-                filters.enquiryType === "CONSOLIDATED"
-                  ? "Consolidation"
-                  : "Collation"
-              }`}
-              variant="outlined"
-            />
+    {filters.cgl?.length > 0 && (
+      <Chip
+        size="small"
+        label={`CGL: ${
+          filters.cgl.includes("All CGLs")
+            ? "All CGLs"
+            : filters.cgl.join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
 
-            {isCircleVisible && (
-              <Chip
-                size="small"
-                label={`Circle: ${
-                  filters.circle === CIRCLE_GROUPS.ALL
-                    ? "All Circles"
-                    : filters.circle === CIRCLE_GROUPS.DOMESTIC
-                      ? "Domestic Circles"
-                      : filters.circle === CIRCLE_GROUPS.FOREIGN
-                        ? "Foreign Circles"
-                        : circles.find(
-                            (c) => c.circleCode === filters.circle
-                          )
-                          ? `${
-                              circles.find(
-                                (c) => c.circleCode === filters.circle
-                              ).circleCode
-                            } - ${
-                              circles.find(
-                                (c) => c.circleCode === filters.circle
-                              ).circleName
-                            }`
-                          : filters.circle || "—"
-                }`}
-                variant="outlined"
-              />
-            )}
+    {filters.currencies?.length > 0 && (
+      <Chip
+        size="small"
+        label={`Currency: ${
+          filters.currencies.includes("All Currencies")
+            ? "All Currencies"
+            : filters.currencies.join(", ")
+        }`}
+        variant="outlined"
+      />
+    )}
 
-            {isBranchVisible && (
-              <Chip
-                size="small"
-                label={`Branch: ${
-                  filters.branches?.includes("All Branches")
-                    ? "All Branches"
-                    : filters.branches?.join(", ") || "—"
-                }`}
-                variant="outlined"
-              />
-            )}
-
-            <Chip
-              size="small"
-              label={`CGL: ${
-                filters.cgl?.includes("All CGLs")
-                  ? "All CGLs"
-                  : filters.cgl?.join(", ") || "—"
-              }`}
-              variant="outlined"
-            />
-
-            <Chip
-              size="small"
-              label={`Currency: ${
-                filters.currencies?.includes("All Currencies")
-                  ? "All Currencies"
-                  : filters.currencies?.join(", ") || "—"
-              }`}
-              variant="outlined"
-            />
-
-            <Chip
-              size="small"
-              label={`Balance Date: ${
-                filters.balanceDate?.isValid?.()
-                  ? filters.balanceDate.format("DD-MM-YYYY")
-                  : "—"
-              }`}
-              variant="outlined"
-            />
-          </Box>
-        </Box>
-
-        <Box
-          sx={{
-            display: "flex",
-            justifyContent: { xs: "flex-end", md: "flex-start" },
-            flexShrink: 0,
-          }}
-        >
-          <Button
-            variant="outlined"
-            startIcon={<VisibilityIcon />}
-            onClick={() => setFiltersExpanded(true)}
-            sx={{
-              borderRadius: 2,
-              textTransform: "none",
-              fontWeight: 700,
-              color: "#58469f",
-              borderColor: "#58469f",
-              whiteSpace: "nowrap",
-              "&:hover": {
-                bgcolor: "rgba(88, 70, 159, 0.08)",
-                borderColor: "#58469f",
-              },
-            }}
-          >
-            Edit Filters
-          </Button>
-        </Box>
-      </Stack>
-    </CardContent>
-  </Card>
+    {filters.balanceDate?.isValid?.() && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`Balance Date: ${filters.balanceDate.format(
+          "DD-MM-YYYY"
+        )}`}
+      />
+    )}
+  </Stack>
 )}
