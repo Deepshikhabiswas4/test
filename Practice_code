@@ -1,72 +1,46 @@
-{/* Selected filter summary after search */}
-{searchPerformed && !filtersExpanded && (
+<Stack spacing={2} sx={{ mb: 2, width: "100%" }}>
+  {/* Header row */}
   <Stack
-    direction="row"
-    spacing={1}
-    useFlexGap
-    flexWrap="wrap"
-    sx={{
-      mb: 1.5,
-      alignItems: "center",
-      width: "100%",
-    }}
+    direction={{ xs: "column", lg: "row" }}
+    justifyContent="space-between"
+    alignItems={{ xs: "stretch", lg: "center" }}
+    spacing={2}
   >
-    {filters.branches?.length > 0 && (
-      <Chip
-        size="small"
-        label={`Branch: ${
-          filters.branches.includes("All Branches")
-            ? "All Branches"
-            : filters.branches.join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
+    <Box sx={{ flex: 1, minWidth: 0 }}>
+      <Typography
+        variant="h4"
+        sx={{ fontWeight: 900 }}
+      >
+        Ledger Balance Insights
+      </Typography>
 
-    {filters.circle && (
-      <Chip
-        size="small"
-        label={`Circle: ${
-          filters.circle === CIRCLE_GROUPS.ALL
-            ? "All Circles"
-            : filters.circle
-        }`}
-        variant="outlined"
-      />
-    )}
+      <Typography variant="body2" color="text.secondary">
+        Ledger Balance search and analysis
+      </Typography>
+    </Box>
 
-    {filters.cgl?.length > 0 && (
-      <Chip
-        size="small"
-        label={`CGL: ${
-          filters.cgl.includes("All CGLs")
-            ? "All CGLs"
-            : filters.cgl.join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
+    {/* Keep your existing Switch Enquiry Type Paper here */}
 
-    {filters.currencies?.length > 0 && (
-      <Chip
+    {searchPerformed && (
+      <Button
+        variant="contained"
         size="small"
-        label={`Currency: ${
-          filters.currencies.includes("All Currencies")
-            ? "All Currencies"
-            : filters.currencies.join(", ")
-        }`}
-        variant="outlined"
-      />
-    )}
-
-    {filters.balanceDate?.isValid?.() && (
-      <Chip
-        size="small"
-        variant="outlined"
-        label={`Balance Date: ${filters.balanceDate.format(
-          "DD-MM-YYYY"
-        )}`}
-      />
+        startIcon={<ManageSearchOutlinedIcon />}
+        onClick={onToggleFilters}
+        sx={{
+          textTransform: "none",
+          borderRadius: "8px",
+          fontWeight: 600,
+          minWidth: { xs: "100%", sm: "140px" },
+          width: { xs: "100%", sm: "auto" },
+          height: 36,
+          px: 1.5,
+        }}
+      >
+        {filtersExpanded ? "Hide Filters" : "Edit Filters"}
+      </Button>
     )}
   </Stack>
-)}
+
+  {/* Put the corrected selected-filter summary here */}
+</Stack>
