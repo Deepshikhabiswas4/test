@@ -1,46 +1,213 @@
-<Stack spacing={2} sx={{ mb: 2, width: "100%" }}>
-  {/* Header row */}
+
+{/* HEADER: Title, Enquiry Type and Filters button */}
+<Stack
+  direction={{ xs: "column", lg: "row" }}
+  justifyContent="space-between"
+  alignItems={{ xs: "stretch", lg: "center" }}
+  spacing={2}
+  sx={{ mb: 2, width: "100%" }}
+>
+  {/* Left: Title */}
+  <Box sx={{ minWidth: 0 }}>
+    <Typography
+      variant="h4"
+      sx={{
+        fontWeight: 900,
+        fontSize: { xs: "1.5rem", md: "2rem" },
+      }}
+    >
+      Ledger Balance Insights
+    </Typography>
+
+    <Typography variant="body2" color="text.secondary">
+      Ledger Balance search and analysis
+    </Typography>
+  </Box>
+
+  {/* Right: Enquiry Type and Filters button */}
   <Stack
-    direction={{ xs: "column", lg: "row" }}
-    justifyContent="space-between"
-    alignItems={{ xs: "stretch", lg: "center" }}
-    spacing={2}
+    direction="row"
+    spacing={1.5}
+    alignItems="center"
+    justifyContent={{ xs: "flex-start", lg: "flex-end" }}
+    sx={{
+      flexWrap: "wrap",
+      flexShrink: 0,
+    }}
   >
-    <Box sx={{ flex: 1, minWidth: 0 }}>
-      <Typography
-        variant="h4"
-        sx={{ fontWeight: 900 }}
-      >
-        Ledger Balance Insights
-      </Typography>
-
-      <Typography variant="body2" color="text.secondary">
-        Ledger Balance search and analysis
-      </Typography>
-    </Box>
-
-    {/* Keep your existing Switch Enquiry Type Paper here */}
-
-    {searchPerformed && (
-      <Button
-        variant="contained"
-        size="small"
-        startIcon={<ManageSearchOutlinedIcon />}
-        onClick={onToggleFilters}
+    {!isBranchUser && (
+      <Paper
+        elevation={2}
         sx={{
-          textTransform: "none",
-          borderRadius: "8px",
-          fontWeight: 600,
-          minWidth: { xs: "100%", sm: "140px" },
-          width: { xs: "100%", sm: "auto" },
-          height: 36,
-          px: 1.5,
+          px: { xs: 1.5, sm: 2 },
+          py: 1,
+          borderRadius: "50px",
+          display: "flex",
+          flexDirection: { xs: "column", sm: "row" },
+          alignItems: "center",
+          gap: { xs: 1, sm: 2 },
+          border: "1px solid #ffffff77",
+          bgcolor: "#bba7da4f",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
         }}
       >
-        {filtersExpanded ? "Hide Filters" : "Edit Filters"}
-      </Button>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <SummarizeIcon sx={{ color: "#58469f" }} />
+
+          <Typography
+            variant="subtitle2"
+            sx={{
+              fontWeight: 800,
+              color: "#333",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Switch Enquiry Type
+          </Typography>
+        </Stack>
+
+        <ToggleButtonGroup
+          exclusive
+          size="small"
+          value={filters.enquiryType}
+          onChange={(_, value) => {
+            if (value) {
+              onFilterChange("enquiryType", value);
+            }
+          }}
+          sx={{
+            "& .MuiToggleButton-root": {
+              px: { xs: 1, sm: 1.5 },
+              py: 0.6,
+              borderRadius: "10px !important",
+              textTransform: "none",
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+              border: "1px solid #d0d7de",
+              color: "#555",
+            },
+            "& .MuiToggleButton-root.Mui-selected": {
+              bgcolor: "#58469f",
+              color: "#fff",
+              borderColor: "#58469f",
+              "&:hover": {
+                bgcolor: "#45357a",
+              },
+            },
+          }}
+        >
+          <ToggleButton value="COLLATION">
+            Collation
+          </ToggleButton>
+
+          <ToggleButton value="CONSOLIDATED">
+            Consolidation
+          </ToggleButton>
+        </ToggleButtonGroup>
+      </Paper>
+    )}
+
+    <Button
+      variant="contained"
+      onClick={onToggleFilters}
+      startIcon={
+        filtersExpanded ? (
+          <VisibilityOffIcon />
+        ) : (
+          <VisibilityIcon />
+        )
+      }
+      sx={{
+        borderRadius: "10px",
+        px: 2,
+        py: 1,
+        bgcolor: "#58469f",
+        fontWeight: 700,
+        textTransform: "none",
+        whiteSpace: "nowrap",
+        "&:hover": {
+          bgcolor: "#45357a",
+        },
+      }}
+    >
+      {filtersExpanded ? "Hide Filters" : "Edit Filters"}
+    </Button>
+  </Stack>
+</Stack>
+
+{/* SELECTED FILTER VALUES: Visible after search when filters are hidden */}
+{searchPerformed && !filtersExpanded && (
+  <Stack
+    direction="row"
+    spacing={1}
+    useFlexGap
+    flexWrap="wrap"
+    alignItems="center"
+    sx={{
+      mb: 2,
+      width: "100%",
+    }}
+  >
+    {filters.branches?.length > 0 && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`Branch: ${
+          filters.branches.includes("All Branches")
+            ? "All Branches"
+            : filters.branches.join(", ")
+        }`}
+      />
+    )}
+
+    {filters.circle && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`Circle: ${
+          filters.circle === CIRCLE_GROUPS.ALL
+            ? "All Circles"
+            : filters.circle === CIRCLE_GROUPS.DOMESTIC
+              ? "Domestic Circles"
+              : filters.circle === CIRCLE_GROUPS.FOREIGN
+                ? "Foreign Circles"
+                : filters.circle
+        }`}
+      />
+    )}
+
+    {filters.cgl?.length > 0 && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`CGL: ${
+          filters.cgl.includes("All CGLs")
+            ? "All CGLs"
+            : filters.cgl.join(", ")
+        }`}
+      />
+    )}
+
+    {filters.currencies?.length > 0 && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`Currency: ${
+          filters.currencies.includes("All Currencies")
+            ? "All Currencies"
+            : filters.currencies.join(", ")
+        }`}
+      />
+    )}
+
+    {filters.balanceDate?.isValid?.() && (
+      <Chip
+        size="small"
+        variant="outlined"
+        label={`Balance Date: ${filters.balanceDate.format(
+          "DD-MM-YYYY"
+        )}`}
+      />
     )}
   </Stack>
-
-  {/* Put the corrected selected-filter summary here */}
-</Stack>
+)}
