@@ -1,59 +1,17 @@
-    public byte[] reportFromServer(int submissionId, boolean flag) throws IOException {
-        String reportId = String.valueOf(submissionId);
+        List<Map<String, Object>> getFilePathList = null;
+        String roCodeFlag = (String) data.get("roCodeFlag");
 
-        // Fix for Line 285 & Line 287 (Access Control: Database - High)
-        verifyUserAccess(reportId);
+        // Validate circleCode before querying database (Fixes High Issue at Line 230)
+        verifyUserAccess(circleCode);
 
-        ArrayList<TarReportsMasterList> getBranchReportPath = null;
-        ArrayList<TarArchive> getBranchReportPathArchive = null;
+        if ("true".equalsIgnoreCase(roCodeFlag)) {
+            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathList(circleCode, quarterDate, reportMasterId);
+        } else if ("false".equalsIgnoreCase(roCodeFlag)) {
+            String roCode = data.get("roCode") != null ? data.get("roCode").toString() : null;
+            
+            // Validate roCode before querying database (Fixes High Issue at Line 232)
+            verifyUserAccess(roCode);
 
-        if (flag) {
-            getBranchReportPath = tarReportsMasterListRepository.getBranchReportPath(submissionId);
-        } else {
-            getBranchReportPathArchive = tarMainArchiveRepository.getBranchReportPathArchive(reportId, CommonConstants.STATUS_50);
+            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathListForRoCode(circleCode, roCode, quarterDate, reportMasterId);
         }
-
-        String fullPath = null;
-        if (flag && getBranchReportPath != null && !getBranchReportPath.isEmpty()) {
-            fullPath = getBranchReportPath.get(0).getPdfFilePath();
-        } else if (!flag && getBranchReportPathArchive != null && !getBranchReportPathArchive.isEmpty()) {
-            fullPath = getBranchReportPathArchive.get(0).getPdfFilePath();
-        }
-
-        if (fullPath == null || fullPath.trim().isEmpty() || !fullPath.contains("/")) {
-            throw new SecurityException("Unauthorized or invalid report access");
-        }
-
-        // Fix for Line 318 (Path Manipulation - Critical)
-        String rawFileName = fullPath.substring(fullPath.lastIndexOf('/') + 1);
-        String safeFileName = new File(rawFileName).getName();
-        String filePath = fullPath.substring(0, fullPath.lastIndexOf('/'));
-
-        // Fix for Log Forging (Low)
-        log.info("Processing file: {}", sanitizeLog(safeFileName));
-
-        byte[] pdfFile = null;
-        String serverPostKeyString = "0";
-        String serverIp = CommonServerFunctions.getServerIp(serverPostKeyString);
-        String encryptedSftpPass = crsPropertyRepository.getServerPwd(serverIp);
-
-        // Fix for Line 312 (Privacy Violation - Critical): removed password logging
-        log.info("Connecting to SFTP server: {}", sanitizeLog(serverIp));
-
-        boolean fileTransfer = FileTransfer.getFileFromSftp(safeFileName, serverPostKeyString, filePath);
-        log.info("File transfer status: {}", fileTransfer);
-
-        if (fileTransfer) {
-            File baseDir = new File(".").getCanonicalFile();
-            File file2 = new File(baseDir, safeFileName).getCanonicalFile();
-
-            if (!file2.getPath().startsWith(baseDir.getPath())) {
-                throw new SecurityException("Invalid file path");
-            }
-
-            pdfFile = FileUtils.readFileToByteArray(file2);
-        }
-
-        return pdfFile;
-    }
-    
+        
