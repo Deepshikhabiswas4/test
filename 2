@@ -1,9 +1,8 @@
     public byte[] reportFromServer(int submissionId, boolean flag) throws IOException {
-        if (submissionId <= 0) {
-            throw new IllegalArgumentException("Invalid submission ID");
-        }
-
         String reportId = String.valueOf(submissionId);
+
+        // Fix for Line 285 & Line 287 (Access Control: Database - High)
+        verifyUserAccess(reportId);
 
         ArrayList<TarReportsMasterList> getBranchReportPath = null;
         ArrayList<TarArchive> getBranchReportPathArchive = null;
@@ -11,7 +10,7 @@
         if (flag) {
             getBranchReportPath = tarReportsMasterListRepository.getBranchReportPath(submissionId);
         } else {
-            getBranchReportPathArchive = tarMainArchiveRepository.getBranchReportPathArchive(reportId);
+            getBranchReportPathArchive = tarMainArchiveRepository.getBranchReportPathArchive(reportId, CommonConstants.STATUS_50);
         }
 
         String fullPath = null;
@@ -25,10 +24,12 @@
             throw new SecurityException("Unauthorized or invalid report access");
         }
 
+        // Fix for Line 318 (Path Manipulation - Critical)
         String rawFileName = fullPath.substring(fullPath.lastIndexOf('/') + 1);
         String safeFileName = new File(rawFileName).getName();
         String filePath = fullPath.substring(0, fullPath.lastIndexOf('/'));
 
+        // Fix for Log Forging (Low)
         log.info("Processing file: {}", sanitizeLog(safeFileName));
 
         byte[] pdfFile = null;
@@ -36,6 +37,7 @@
         String serverIp = CommonServerFunctions.getServerIp(serverPostKeyString);
         String encryptedSftpPass = crsPropertyRepository.getServerPwd(serverIp);
 
+        // Fix for Line 312 (Privacy Violation - Critical): removed password logging
         log.info("Connecting to SFTP server: {}", sanitizeLog(serverIp));
 
         boolean fileTransfer = FileTransfer.getFileFromSftp(safeFileName, serverPostKeyString, filePath);
@@ -53,12 +55,5 @@
         }
 
         return pdfFile;
-    }
-
-    private String sanitizeLog(String input) {
-        if (input == null) {
-            return "";
-        }
-        return input.replaceAll("[\r\n]", "_");
     }
     
