@@ -1,17 +1,17 @@
-        List<Map<String, Object>> getFilePathList = null;
-        String roCodeFlag = (String) data.get("roCodeFlag");
+String fileName = getSafeFileName(fullFilePath.split("/")[8]);
 
-        // Validate circleCode before querying database (Fixes High Issue at Line 230)
-        verifyUserAccess(circleCode);
+log.info("fileName>>>" + sanitizeLog(fileName));
 
-        if ("true".equalsIgnoreCase(roCodeFlag)) {
-            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathList(circleCode, quarterDate, reportMasterId);
-        } else if ("false".equalsIgnoreCase(roCodeFlag)) {
-            String roCode = data.get("roCode") != null ? data.get("roCode").toString() : null;
-            
-            // Validate roCode before querying database (Fixes High Issue at Line 232)
-            verifyUserAccess(roCode);
-
-            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathListForRoCode(circleCode, roCode, quarterDate, reportMasterId);
-        }
-        
+ZipEntry ze = new ZipEntry(fileName);
+log.info("ze>>>" + ze);
+zos.putNextEntry(ze);
+log.info("zos>>>" + zos);
+File file = new File(fileName);
+log.info("file exists>>>" + file.exists());
+if (file.exists()) {
+    log.info("file exists >>>");
+    byte[] pdfContent = FileUtils.readFileToByteArray(file);
+    log.info("pdfContent====" + pdfContent);
+    zos.write(pdfContent);
+    zos.closeEntry();
+}
