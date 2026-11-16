@@ -15,3 +15,39 @@ if (file.exists()) {
     zos.write(pdfContent);
     zos.closeEntry();
 }
+
+
+
+
+
+ private String getSafeFileName(String rawFileName) {
+     if (rawFileName == null || rawFileName.trim().isEmpty()) {
+         throw new SecurityException("Invalid file name");
+     }
+     String normalized = rawFileName.replace("\\", "/");
+     String baseName = normalized.substring(normalized.lastIndexOf('/') + 1);
+     if (!baseName.matches("^[a-zA-Z0-9._-]+$")) {
+         throw new SecurityException("Unsafe characters in file name");
+     }
+     StringBuilder cleanName = new StringBuilder();
+     for (char c : baseName.toCharArray()) {
+         if (Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-') {
+             cleanName.append(c);
+         }
+     }
+     return cleanName.toString();
+ }
+
+ private String getSafePath(String rawPath) {
+     if (rawPath == null || rawPath.trim().isEmpty() || rawPath.contains("..")) {
+         throw new SecurityException("Invalid or unsafe file path");
+     }
+     StringBuilder cleanPath = new StringBuilder();
+     for (char c : rawPath.toCharArray()) {
+         if (Character.isLetterOrDigit(c) || c == '/' || c == '\\' || c == '.' || c == '_' || c == '-' || c == ':') {
+             cleanPath.append(c);
+         }
+     }
+     return cleanPath.toString();
+ }
+ 
