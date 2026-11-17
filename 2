@@ -1,40 +1,12 @@
-     if (fileTransfer) {
-         String cleanName = getSafeFileName(safeFileName);
-         Path baseDir = Paths.get(".").toAbsolutePath().normalize();
-         Path targetPath = baseDir.resolve(cleanName).normalize();
+String safeName = getSafeFileName(fileName);
+Path baseDir = Paths.get(".").toAbsolutePath().normalize();
+Path targetPath = baseDir.resolve(safeName).normalize();
+if (!targetPath.startsWith(baseDir)) {
+    throw new SecurityException("Invalid file path");
+}
+log.info("f>>>" + targetPath.getFileName());
 
-         if (!targetPath.startsWith(baseDir)) {
-             throw new SecurityException("Invalid file path");
-         }
+os = Files.newOutputStream(targetPath);
+channelSftp.get(fileName, os);
 
-         pdfFile = Files.readAllBytes(targetPath);
-     }
-     
-
-
-
-     String cleanEvidenceName = getSafeFileName(fileName);
-     log.info("fileName>>>" + sanitizeLog(cleanEvidenceName));
-
-     ZipEntry ze = new ZipEntry(cleanEvidenceName);
-     log.info("ze>>>" + ze);
-     zos.putNextEntry(ze);
-     log.info("zos>>>" + zos);
-
-     Path baseDir = Paths.get(".").toAbsolutePath().normalize();
-     Path targetPath = baseDir.resolve(cleanEvidenceName).normalize();
-
-     if (!targetPath.startsWith(baseDir)) {
-         throw new SecurityException("Invalid file path");
-     }
-
-     boolean exists = Files.exists(targetPath);
-     log.info("file exists>>>" + exists);
-     if (exists) {
-         log.info("file exists >>>");
-         byte[] pdfContent = Files.readAllBytes(targetPath);
-         log.info("pdfContent====" + pdfContent);
-         zos.write(pdfContent);
-         zos.closeEntry();
-     }
      
