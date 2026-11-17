@@ -10,3 +10,13 @@ os = Files.newOutputStream(targetPath);
 channelSftp.get(fileName, os);
 
      
+String safeName = getSafeFileName(fileName);
+Path baseDir = Paths.get(".").toAbsolutePath().normalize();
+Path targetPath = baseDir.resolve(safeName).normalize();
+if (!targetPath.startsWith(baseDir)) {
+    throw new SecurityException("Invalid file path");
+}
+log.info(targetPath.getFileName());
+
+os = Files.newOutputStream(targetPath);
+channelSftp.get(fileName, os);
