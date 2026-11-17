@@ -1,27 +1,17 @@
-String safePdfName = getSafeFileName(jrxmlName + ".pdf");
-Path reportDir = Paths.get(config.getProperty("REPORT_HOME_DIR")).toAbsolutePath().normalize();
-Path outTarget = reportDir.resolve(safePdfName).normalize();
-if (!outTarget.startsWith(reportDir)) {
-    throw new SecurityException("Invalid report output path");
+Path uploadRoot = Paths.get("/media/CRS/TAR/Upload").toAbsolutePath().normalize();
+Path checkDirPath = Paths.get(getSafePath(checkIsExist)).toAbsolutePath().normalize();
+if (!checkDirPath.startsWith(uploadRoot)) {
+    throw new SecurityException("Invalid directory path");
 }
-JasperExportManager.exportReportToPdfFile(jasperPrint, outTarget.toString());
-pdfContent = Files.readAllBytes(outTarget);
-
-
-
-
-String safeName = getSafeFileName(fileName);
-Path baseDir = Paths.get(".").toAbsolutePath().normalize();
-Path targetPath = baseDir.resolve(safeName).normalize();
-if (!targetPath.startsWith(baseDir)) {
-    throw new SecurityException("Invalid file path");
+if (!Files.exists(checkDirPath)) {
+    Files.createDirectories(checkDirPath);
 }
-boolean exists = Files.exists(targetPath);
-log.info("file exists>>>" + exists);
-if (exists) {
-    log.info("file exists >>>");
-    byte[] pdfContent = Files.readAllBytes(targetPath);
-    log.info("pdfContent====" + pdfContent);
-    zos.write(pdfContent);
-    zos.closeEntry();
+
+
+Path destTarget = Paths.get(getSafePath(destpath)).toAbsolutePath().normalize();
+if (!destTarget.startsWith(uploadRoot)) {
+    throw new SecurityException("Invalid destination zip path");
 }
+
+OutputStream fos = Files.newOutputStream(destTarget);
+ZipOutputStream zos = new ZipOutputStream(fos);
