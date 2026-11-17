@@ -1,22 +1,27 @@
+String safePdfName = getSafeFileName(jrxmlName + ".pdf");
+Path reportDir = Paths.get(config.getProperty("REPORT_HOME_DIR")).toAbsolutePath().normalize();
+Path outTarget = reportDir.resolve(safePdfName).normalize();
+if (!outTarget.startsWith(reportDir)) {
+    throw new SecurityException("Invalid report output path");
+}
+JasperExportManager.exportReportToPdfFile(jasperPrint, outTarget.toString());
+pdfContent = Files.readAllBytes(outTarget);
+
+
+
+
 String safeName = getSafeFileName(fileName);
 Path baseDir = Paths.get(".").toAbsolutePath().normalize();
 Path targetPath = baseDir.resolve(safeName).normalize();
 if (!targetPath.startsWith(baseDir)) {
     throw new SecurityException("Invalid file path");
 }
-log.info("f>>>" + targetPath.getFileName());
-
-os = Files.newOutputStream(targetPath);
-channelSftp.get(fileName, os);
-
-     
-String safeName = getSafeFileName(fileName);
-Path baseDir = Paths.get(".").toAbsolutePath().normalize();
-Path targetPath = baseDir.resolve(safeName).normalize();
-if (!targetPath.startsWith(baseDir)) {
-    throw new SecurityException("Invalid file path");
+boolean exists = Files.exists(targetPath);
+log.info("file exists>>>" + exists);
+if (exists) {
+    log.info("file exists >>>");
+    byte[] pdfContent = Files.readAllBytes(targetPath);
+    log.info("pdfContent====" + pdfContent);
+    zos.write(pdfContent);
+    zos.closeEntry();
 }
-log.info(targetPath.getFileName());
-
-os = Files.newOutputStream(targetPath);
-channelSftp.get(fileName, os);
