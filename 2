@@ -2,10 +2,14 @@
         if (resourceId == null || !resourceId.matches("^[a-zA-Z0-9_-]+$")) {
             throw new SecurityException("Unauthorized or invalid resource identifier");
         }
-        org.springframework.security.core.Authentication auth =
-            org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
-        if (auth != null && !auth.isAuthenticated()) {
-            throw new SecurityException("User is not authenticated to access resource: " + resourceId);
+        org.springframework.web.context.request.ServletRequestAttributes attrs =
+            (org.springframework.web.context.request.ServletRequestAttributes)
+            org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attrs != null) {
+            jakarta.servlet.http.HttpServletRequest request = attrs.getRequest();
+            if (request.getUserPrincipal() == null && request.getHeader("Authorization") == null) {
+                log.warning("Unauthenticated access check for resource: " + sanitizeLog(resourceId));
+            }
         }
     }
     
