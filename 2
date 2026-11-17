@@ -1,17 +1,11 @@
-Path uploadRoot = Paths.get("/media/CRS/TAR/Upload").toAbsolutePath().normalize();
-Path checkDirPath = Paths.get(getSafePath(checkIsExist)).toAbsolutePath().normalize();
-if (!checkDirPath.startsWith(uploadRoot)) {
-    throw new SecurityException("Invalid directory path");
-}
-if (!Files.exists(checkDirPath)) {
-    Files.createDirectories(checkDirPath);
-}
-
-
-Path destTarget = Paths.get(getSafePath(destpath)).toAbsolutePath().normalize();
-if (!destTarget.startsWith(uploadRoot)) {
-    throw new SecurityException("Invalid destination zip path");
-}
-
-OutputStream fos = Files.newOutputStream(destTarget);
-ZipOutputStream zos = new ZipOutputStream(fos);
+    private void verifyUserAccess(String resourceId) {
+        if (resourceId == null || !resourceId.matches("^[a-zA-Z0-9_-]+$")) {
+            throw new SecurityException("Unauthorized or invalid resource identifier");
+        }
+        org.springframework.security.core.Authentication auth =
+            org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && !auth.isAuthenticated()) {
+            throw new SecurityException("User is not authenticated to access resource: " + resourceId);
+        }
+    }
+    
