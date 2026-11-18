@@ -1,90 +1,29 @@
-//creates new file object that represents the file in the file s/m , it doesn't create a new file but provides the object representation of the path.
-            String relativeCheck = checkIsExist.replace("/media/CRS/TAR/upload/", "").replace("/media/CRS/TAR/upload", "");
-            String[] checkSegments = relativeCheck.isEmpty() ? new String[0] : relativeCheck.split("/");
-            File isFilePathExist = resolveSafeFile("/media/CRS/TAR/upload", checkSegments);
-            if (!isFilePathExist.exists()) {
-                isFilePathExist.mkdirs();
-            }
+ private String sanitizeSegment(String value, String fieldName) {
+     if (value == null || value.isEmpty() || value.contains("..")) {
+         throw new IllegalArgumentException("Invalid characters in " + fieldName);
+     }
+     StringBuilder clean = new StringBuilder(value.length());
+     for (int i = 0; i < value.length(); i++) {
+         char c = value.charAt(i);
+         int idx = ALLOWED_CHARS.indexOf(c);
+         if (idx < 0) {
+             throw new IllegalArgumentException("Invalid character in " + fieldName);
+         }
+         clean.append(ALLOWED_CHARS.charAt(idx));
+     }
+     return clean.toString();
+ }
 
-            if (fileDetailsList.size() == 0) {
-                isEvidencePresent = false;
-            } else {
-                log.info("evidences were present");
-
-                String relativeDest = destpath.replace("/media/CRS/TAR/upload/", "");
-                File opFile = resolveSafeFile("/media/CRS/TAR/upload", relativeDest.split("/"));
-
-                FileOutputStream fos = new FileOutputStream(opFile);
-                ZipOutputStream zos = new ZipOutputStream(fos);
-
-                HashMap<String, String> filesHashMap = new HashMap<>();
-
-                for (int i = 0; i < fileDetailsList.size(); i++) {
-                    log.info("i     " + i);
-                    String fullFilePath = (String) fileDetailsList.get(i).get("FILE_PATH");
-                    String fileName = fullFilePath.split("/")[8];
-                    String filePath = fullFilePath.substring(0, fullFilePath.length() - fileName.length());
-
-                    log.info("filePath      " + filePath);
-                    filePath = filePath.replace("/", "\\");
-                    log.info("filePath      " + filePath);
-                    log.info("fullfilepath      " + fullFilePath);
-                    log.info("fileName      " + fileName);
-
-                    filesHashMap.put(fileName, filePath);
-                    log.info("filehashmap>>>" + filesHashMap);
-                }
-
-                String serverPostKeyString = CommonConstants.POST_SERVER_IP_0;
-                String ipAddress = CommonServerFunctions.getServerIp(serverPostKeyString);
-                String encryptedSftpPass = crsPropertyRepository.getServerPwd(ipAddress);
-
-                log.info("serverPostKeyString     " + serverPostKeyString);
-                log.info("ipAddress     " + ipAddress);
-                // log.info("encryptedSftpPass     " + encryptedSftpPass);
-
-                boolean fileTransfer = FileTransfer.getbulkFilesFromSftp(serverPostKeyString, encryptedSftpPass, filesHashMap); //3 files fetches
-                log.info("filetransfer~~~" + fileTransfer);
-
-                if (fileTransfer) {
-                    log.info("file transfer true condition>>>");
-
-                    for (int i = 0; i < fileDetailsList.size(); i++) {
-                        log.info("i>>>> of after 3 files fetched " + i);
-
-                        String fullFilePath = (String) fileDetailsList.get(i).get("FILE_PATH");
-                        log.info("fullFilePath1>>>" + fullFilePath);
-                        fullFilePath = fullFilePath.replace("\\", "/");
-
-                        //modified by: v1022620
-                        String rawEvidenceName = fullFilePath.split("/")[8];
-                        File file = resolveSafeFile(".", rawEvidenceName);
-                        log.info("fileName>>>" + sanitizeLog(file.getName()));
-
-                        ZipEntry ze = new ZipEntry(file.getName());
-                        log.info("ze>>>" + ze);
-                        zos.putNextEntry(ze);
-                        log.info("zos>>>" + zos);
-
-                        boolean exists = file.exists();
-                        log.info("file exists>>>" + exists);
-                        if (exists) {
-                            log.info("file exists >>>");
-                            byte[] pdfContent = Files.readAllBytes(file.toPath());
-                            log.info("pdfContent====" + pdfContent);
-                            zos.write(pdfContent);
-                            zos.closeEntry();
-                        }
-                    }
-                    zos.flush();
-                    fos.flush();
-                    zos.close();
-                    fos.close();
-                    byteStream = Files.readAllBytes(opFile.toPath());
-                    log.info("byetstream>>>" + byteStream);
-                    isEvidencePresent = true;
-                }
-                finalMap.put("isEvidencePresent", isEvidencePresent);
-                finalMap.put("byteContent", byteStream);
-            }
-            
+ private File resolveSafeFile(String baseDir, String... segments) {
+     Path basePath = Paths.get(baseDir).toAbsolutePath().normalize();
+     Path resolved = basePath;
+     for (String segment : segments) {
+         String cleanSegment = sanitizeSegment(segment, "path segment");
+         resolved = resolved.resolve(cleanSegment).normalize();
+     }
+     if (!resolved.startsWith(basePath)) {
+         throw new SecurityException("Path traversal attempt detected.");
+     }
+     return resolved.toFile();
+ }
+ 
