@@ -15,3 +15,36 @@ File f = resolveSafeFile(".", baseName);
 log.info(f.getName());
 os = new FileOutputStream(f);
 channelSftp.get(fileName, os);
+
+
+
+
+ private String sanitizeSegment(String value, String fieldName) {
+     if (value == null || value.isEmpty() || value.contains("..")) {
+         throw new IllegalArgumentException("Invalid characters in " + fieldName);
+     }
+     StringBuilder clean = new StringBuilder(value.length());
+     for (int i = 0; i < value.length(); i++) {
+         char c = value.charAt(i);
+         int idx = ALLOWED_CHARS.indexOf(c);
+         if (idx < 0) {
+             throw new IllegalArgumentException("Invalid character in " + fieldName);
+         }
+         clean.append(ALLOWED_CHARS.charAt(idx));
+     }
+     return clean.toString();
+ }
+
+ private File resolveSafeFile(String baseDir, String... segments) {
+     Path basePath = Paths.get(baseDir).toAbsolutePath().normalize();
+     Path resolved = basePath;
+     for (String segment : segments) {
+         String cleanSegment = sanitizeSegment(segment, "path segment");
+         resolved = resolved.resolve(cleanSegment).normalize();
+     }
+     if (!resolved.startsWith(basePath)) {
+         throw new SecurityException("Path traversal attempt detected.");
+     }
+     return resolved.toFile();
+ }
+ 
