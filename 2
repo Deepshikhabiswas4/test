@@ -1,11 +1,9 @@
 //creates new file object that represents the file in the file s/m , it doesn't create a new file but provides the object representation of the path.
-            Path uploadRoot = Paths.get("/media/CRS/TAR/Upload").toAbsolutePath().normalize();
-            Path checkDirPath = Paths.get(getSafePath(checkIsExist)).toAbsolutePath().normalize();
-            if (!checkDirPath.startsWith(uploadRoot)) {
-                throw new SecurityException("Invalid directory path");
-            }
-            if (!Files.exists(checkDirPath)) {
-                Files.createDirectories(checkDirPath);
+            String relativeCheck = checkIsExist.replace("/media/CRS/TAR/upload/", "").replace("/media/CRS/TAR/upload", "");
+            String[] checkSegments = relativeCheck.isEmpty() ? new String[0] : relativeCheck.split("/");
+            File isFilePathExist = resolveSafeFile("/media/CRS/TAR/upload", checkSegments);
+            if (!isFilePathExist.exists()) {
+                isFilePathExist.mkdirs();
             }
 
             if (fileDetailsList.size() == 0) {
@@ -13,12 +11,10 @@
             } else {
                 log.info("evidences were present");
 
-                Path destTarget = Paths.get(getSafePath(destpath)).toAbsolutePath().normalize();
-                if (!destTarget.startsWith(uploadRoot)) {
-                    throw new SecurityException("Invalid destination zip path");
-                }
+                String relativeDest = destpath.replace("/media/CRS/TAR/upload/", "");
+                File opFile = resolveSafeFile("/media/CRS/TAR/upload", relativeDest.split("/"));
 
-                OutputStream fos = Files.newOutputStream(destTarget);
+                FileOutputStream fos = new FileOutputStream(opFile);
                 ZipOutputStream zos = new ZipOutputStream(fos);
 
                 HashMap<String, String> filesHashMap = new HashMap<>();
@@ -60,32 +56,21 @@
                         log.info("fullFilePath1>>>" + fullFilePath);
                         fullFilePath = fullFilePath.replace("\\", "/");
 
-
-
                         //modified by: v1022620
+                        String rawEvidenceName = fullFilePath.split("/")[8];
+                        File file = resolveSafeFile(".", rawEvidenceName);
+                        log.info("fileName>>>" + sanitizeLog(file.getName()));
 
-                        String fileName = getSafeFileName(fullFilePath.split("/")[8]);
-
-                        String cleanEvidenceName = getSafeFileName(fileName);
-                        log.info("fileName>>>" + sanitizeLog(cleanEvidenceName));
-
-                        ZipEntry ze = new ZipEntry(cleanEvidenceName);
+                        ZipEntry ze = new ZipEntry(file.getName());
                         log.info("ze>>>" + ze);
                         zos.putNextEntry(ze);
                         log.info("zos>>>" + zos);
 
-                        Path baseDir = Paths.get(".").toAbsolutePath().normalize();
-                        Path targetPath = baseDir.resolve(cleanEvidenceName).normalize();
-
-                        if (!targetPath.startsWith(baseDir)) {
-                            throw new SecurityException("Invalid file path");
-                        }
-                    
-                        boolean exists = Files.exists(targetPath);
+                        boolean exists = file.exists();
                         log.info("file exists>>>" + exists);
                         if (exists) {
                             log.info("file exists >>>");
-                            byte[] pdfContent = Files.readAllBytes(targetPath);
+                            byte[] pdfContent = Files.readAllBytes(file.toPath());
                             log.info("pdfContent====" + pdfContent);
                             zos.write(pdfContent);
                             zos.closeEntry();
@@ -95,10 +80,11 @@
                     fos.flush();
                     zos.close();
                     fos.close();
-                    byteStream = Files.readAllBytes(destTarget);
+                    byteStream = Files.readAllBytes(opFile.toPath());
                     log.info("byetstream>>>" + byteStream);
                     isEvidencePresent = true;
                 }
                 finalMap.put("isEvidencePresent", isEvidencePresent);
                 finalMap.put("byteContent", byteStream);
             }
+            
