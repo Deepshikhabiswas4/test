@@ -27,3 +27,6 @@
      return resolved.toFile();
  }
  
+File file2 = resolveSafeFile(config.getProperty("REPORT_HOME_DIR"), jrxmlName + ".pdf");
+JasperExportManager.exportReportToPdfFile(jasperPrint, file2.getAbsolutePath());
+pdfContent = Files.readAllBytes(file2.toPath());
