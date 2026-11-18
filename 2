@@ -30,3 +30,17 @@
 File file2 = resolveSafeFile(config.getProperty("REPORT_HOME_DIR"), jrxmlName + ".pdf");
 JasperExportManager.exportReportToPdfFile(jasperPrint, file2.getAbsolutePath());
 pdfContent = Files.readAllBytes(file2.toPath());
+
+
+String rawName = fileName.replace("\\", "/");
+String baseName = rawName.substring(rawName.lastIndexOf('/') + 1);
+File file = resolveSafeFile(".", baseName);
+boolean exists = file.exists();
+log.info("file exists>>>" + exists);
+if (exists) {
+    log.info("file exists >>>");
+    byte[] pdfContent = Files.readAllBytes(file.toPath());
+    log.info("pdfContent====" + pdfContent);
+    zos.write(pdfContent);
+    zos.closeEntry();
+}
