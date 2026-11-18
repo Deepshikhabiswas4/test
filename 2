@@ -48,3 +48,11 @@ channelSftp.get(fileName, os);
      return resolved.toFile();
  }
  
+
+
+
+        if (fileTransfer) {
+            File file2 = resolveSafeFile(".", safeFileName);
+            pdfFile = FileUtils.readFileToByteArray(file2);
+        }
+        
