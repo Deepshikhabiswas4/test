@@ -1,1 +1,17 @@
 ,lwq,
+String rawName = fileName.replace("\\", "/");
+String baseName = rawName.substring(rawName.lastIndexOf('/') + 1);
+File f = resolveSafeFile(".", baseName);
+log.info("f>>>" + f.getName());
+os = new FileOutputStream(f);
+channelSftp.get(fileName, os);
+
+
+
+
+String rawName = fileName.replace("\\", "/");
+String baseName = rawName.substring(rawName.lastIndexOf('/') + 1);
+File f = resolveSafeFile(".", baseName);
+log.info(f.getName());
+os = new FileOutputStream(f);
+channelSftp.get(fileName, os);
