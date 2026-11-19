@@ -1,4 +1,30 @@
-    private String sanitizeSegment(String value, String fieldName) {
+        String circleCode = sanitizeSegment(user.get("circleCode").toString(), "circleCode");
+        String quarterDate = sanitizeSegment(data.get("quarterDate").toString(), "quarterDate");
+        String reportMasterId = sanitizeSegment(data.get("reportMasterId").toString(), "reportMasterId");
+        log.info("circleCode: {} quarterDate: {} reportMasterId: {}", circleCode, quarterDate, reportMasterId);
+
+        // modified by v1022620
+        List<Map<String, Object>> getFilePathList = null;
+        String roCodeFlag = (String) data.get("roCodeFlag");
+
+        // Validate circleCode before querying database (Fixes High Issue at Line 230)
+        verifyUserAccess(circleCode);
+
+        if ("true".equalsIgnoreCase(roCodeFlag)) {
+            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathList(circleCode, quarterDate, reportMasterId);
+        } else if ("false".equalsIgnoreCase(roCodeFlag)) {
+            String rawRoCode = data.get("roCode") != null ? data.get("roCode").toString() : null;
+            String roCode = sanitizeSegment(rawRoCode, "roCode");
+
+            // Validate roCode before querying database (Fixes High Issue at Line 232)
+            verifyUserAccess(roCode);
+
+            getFilePathList = tarReportMasterListRepository.getWholeCircleFilePathListForRoCode(circleCode, roCode, quarterDate, reportMasterId);
+        }
+
+
+
+            private String sanitizeSegment(String value, String fieldName) {
         if (value == null || value.isEmpty() || value.contains("..")) {
             throw new IllegalArgumentException("Invalid characters in " + fieldName);
         }
@@ -13,60 +39,4 @@
         }
         return clean.toString();
     }
-
-    private int sanitizeInt(Object rawValue, String fieldName) {
-        if (rawValue == null) {
-            throw new IllegalArgumentException(fieldName + " cannot be null");
-        }
-        String str = rawValue.toString().trim();
-        if (str.isEmpty()) {
-            throw new IllegalArgumentException(fieldName + " cannot be empty");
-        }
-        StringBuilder clean = new StringBuilder(str.length());
-        for (int i = 0; i < str.length(); i++) {
-            char c = str.charAt(i);
-            int idx = CommonConstants.ALLOWED_DIGITS.indexOf(c);
-            if (idx < 0) {
-                throw new IllegalArgumentException("Invalid digit in " + fieldName);
-            }
-            clean.append(CommonConstants.ALLOWED_DIGITS.charAt(idx));
-        }
-        return Integer.parseInt(clean.toString());
-    }
     
-
-
-        int reject = 0;
-        String circleCode = sanitizeSegment(String.valueOf(user.get("circleCode")), "circleCode");
-        String quarterDate = sanitizeSegment(data.get("quarterDate").toString(), "quarterDate");
-        String branchCode = sanitizeSegment(data.get("branchCode").toString(), "branchCode");
-        int cleanReportIdInt = sanitizeInt(data.get("reportId"), "reportId");
-        String reportId = sanitizeSegment(String.valueOf(cleanReportIdInt), "reportId");
-        String status = "26";
-        String remarks = "Rejected by LHO Manager.";
-
-        int rejectCheck = lhoManagerServiceRepository.rejectionCheck(circleCode, quarterDate);
-        if (rejectCheck > 0) {
-            reject = lhoManagerServiceRepository.rejectReport(quarterDate, branchCode, reportId, status);
-            insertWorkFlowId(payload, status, cleanReportIdInt, remarks);
-        }
-        return reject;
-        
-int submissionId = sanitizeInt(data.get("submissionId"), "submissionId");
-
- public byte[] reportFromServer(int submissionId, boolean flag) throws IOException {
-     int cleanSubmissionId = sanitizeInt(submissionId, "submissionId");
-     String reportId = sanitizeSegment(String.valueOf(cleanSubmissionId), "reportId");
-
-     // Fix for Line 285 & Line 287 (Access Control: Database - High)
-     verifyUserAccess(reportId);
-
-     ArrayList<TarReportsMasterList> getBranchReportPath = null;
-     ArrayList<TarRmlArchive> getBranchReportPathArchive = null;
-
-     if (flag) {
-         getBranchReportPath = tarReportsMasterListRepository.getBranchReportLHO(cleanSubmissionId);
-     } else {
-         getBranchReportPathArchive = tarRmlArchiveRepository.getBranchReportLHOArchives(reportId, CommonConstants.STATUS_50);
-     }
-     
