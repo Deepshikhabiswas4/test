@@ -34,3 +34,21 @@
         return Integer.parseInt(clean.toString());
     }
     
+
+
+        int reject = 0;
+        String circleCode = sanitizeSegment(String.valueOf(user.get("circleCode")), "circleCode");
+        String quarterDate = sanitizeSegment(data.get("quarterDate").toString(), "quarterDate");
+        String branchCode = sanitizeSegment(data.get("branchCode").toString(), "branchCode");
+        int cleanReportIdInt = sanitizeInt(data.get("reportId"), "reportId");
+        String reportId = sanitizeSegment(String.valueOf(cleanReportIdInt), "reportId");
+        String status = "26";
+        String remarks = "Rejected by LHO Manager.";
+
+        int rejectCheck = lhoManagerServiceRepository.rejectionCheck(circleCode, quarterDate);
+        if (rejectCheck > 0) {
+            reject = lhoManagerServiceRepository.rejectReport(quarterDate, branchCode, reportId, status);
+            insertWorkFlowId(payload, status, cleanReportIdInt, remarks);
+        }
+        return reject;
+        
