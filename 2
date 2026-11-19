@@ -52,3 +52,21 @@
         }
         return reject;
         
+int submissionId = sanitizeInt(data.get("submissionId"), "submissionId");
+
+ public byte[] reportFromServer(int submissionId, boolean flag) throws IOException {
+     int cleanSubmissionId = sanitizeInt(submissionId, "submissionId");
+     String reportId = sanitizeSegment(String.valueOf(cleanSubmissionId), "reportId");
+
+     // Fix for Line 285 & Line 287 (Access Control: Database - High)
+     verifyUserAccess(reportId);
+
+     ArrayList<TarReportsMasterList> getBranchReportPath = null;
+     ArrayList<TarRmlArchive> getBranchReportPathArchive = null;
+
+     if (flag) {
+         getBranchReportPath = tarReportsMasterListRepository.getBranchReportLHO(cleanSubmissionId);
+     } else {
+         getBranchReportPathArchive = tarRmlArchiveRepository.getBranchReportLHOArchives(reportId, CommonConstants.STATUS_50);
+     }
+     
