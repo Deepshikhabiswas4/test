@@ -14,3 +14,15 @@
      return clean.toString();
  }
  
+String submission_id = sanitizeSegment(String.valueOf(mapData.get("submissionId")), "submissionId");
+log.info("Submission_id :- " + submission_id);
+
+try {
+    // Method for getting the status of the track from WORKFLOW table
+    List<Map<String, Object>> trackStatus = workFlowRepository.getTrackStatus(submission_id);
+...
+} catch (Exception e) {
+    log.info("exception accured");
+    responseVO.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR.value());
+    responseVO.setMessage("Exception Occurred while processing request");
+}
