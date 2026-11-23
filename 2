@@ -54,3 +54,24 @@
      return clean.toString();
  }
  
+
+
+        String submission_id = sanitizeSegment(String.valueOf(data.get("submissionId")), "submissionId");
+        log.info("Submission_id :- " + submission_id);
+
+        String quarterEndDate = sanitizeSegment(user.get("quarterEndDate"), "quarterEndDate");
+        String branchCode = sanitizeSegment(user.get("branch_code"), "branch_code");
+
+        // Method for getting the status of the track from WORKFLOW table
+        List<Map<String, Object>> trackStatus = tarStatusRepository.getTrackStatus(branchCode, quarterEndDate, submission_id);
+
+        log.info("trackStatus:- " + trackStatus);
+        responseVO.setStatusCode(HttpStatus.OK.value());
+        responseVO.setMessage("Data retrieved successfully");
+        responseVO.setResult(trackStatus);
+    } catch (Exception e) {
+        log.info("exception accured");
+        responseVO.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        responseVO.setMessage("Exception Occurred while processing request");
+    }
+    
