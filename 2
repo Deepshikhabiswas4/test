@@ -1,41 +1,74 @@
- private String sanitizeSegment(String value, String fieldName) {
-     if (value == null || value.isEmpty() || value.contains("..")) {
-         throw new IllegalArgumentException("Invalid characters in " + fieldName);
-     }
-     StringBuilder clean = new StringBuilder(value.length());
-     for (int i = 0; i < value.length(); i++) {
-         char c = value.charAt(i);
-         int idx = ALLOWED_CHARS.indexOf(c);
-         if (idx < 0) {
-             throw new IllegalArgumentException("Invalid character in " + fieldName);
-         }
-         clean.append(ALLOWED_CHARS.charAt(idx));
-     }
-     return clean.toString();
- }
- 
-String submission_id = sanitizeSegment(String.valueOf(mapData.get("submissionId")), "submissionId");
-log.info("Submission_id :- " + submission_id);
+package com.tcs.CrsUserGuideService.service;
 
-try {
-    // Method for getting the status of the track from WORKFLOW table
-    List<Map<String, Object>> trackStatus = workFlowRepository.getTrackStatus(submission_id);
-...
-} catch (Exception e) {
-    log.info("exception accured");
-    responseVO.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR.value());
-    responseVO.setMessage("Exception Occurred while processing request");
+import com.tcs.CrsUserGuideService.repository.UserGuideRepository;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+
+/**
+ * `* @author : v1018405
+ *
+ * @description : Get User Guide Data in the required format from DB
+ */
+@Slf4j
+@Service("UserGuideService")
+public class UserGuideServiceImpl implements UserGuideService {
+
+    @Autowired
+    UserGuideRepository userGuideRepository;
+
+    @Override
+    public Map<String, Object> getUserGuideData(Map<String, Object> payload) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List<Map<String, Object>> userGuideData = new ArrayList<>();
+
+        try {
+            // Fetch grouped data from the repository
+            List<Map<String, Object>> records = userGuideRepository.getUserGuideData();
+            log.info("userGuide records fetched from DB: {}", records.size());
+
+            // Structure to hold the transformed data
+            Map<String, Map<String, Map<String, Map<String, List<String>>>>> optionMap = new LinkedHashMap<>();
+
+            for (Map<String, Object> record : records) {
+
+                String option = (String) record.get("OPTION_NAME");
+                String head = (String) record.get("HEAD_NAME");
+                String subhead = (String) record.get("SUBHEAD_NAME");
+                String subheadValuesString = (String) record.get("SUBHEAD_VALUES");
+
+                String[] subheadValues = subheadValuesString.split(", "); // Splitting by ", "
+
+                // Create hierarchical JSON structure
+                optionMap
+                        .computeIfAbsent(option, k -> new LinkedHashMap<>())
+                        .computeIfAbsent(head, k -> new LinkedHashMap<>())
+                        .computeIfAbsent("subhead", k -> new LinkedHashMap<>())
+                        .computeIfAbsent(subhead, k -> new ArrayList<>())
+                        .addAll(Arrays.asList(subheadValues));
+            }
+
+            // Convert structured data into the final JSON format
+            optionMap.forEach((option, headMap) -> {
+                userGuideData.add(Map.of("option", option, "head", headMap));
+            });
+
+            result.put("userGuideData", userGuideData);
+            result.put("status", true);
+            log.info("Data added to the result successfully : {}", result);
+        } catch (Exception e) {
+            log.error("Exception occurred while fetching user guide data: {}", e.getMessage(), e);
+            result.put("userGuideData", userGuideData);
+            result.put("status", false);
+        }
+
+        return result;
+    }
+
+    @Override
+    public List<Map<String, Object>> getUserFaq() {
+        return userGuideRepository.getFaqs();
+    }
 }
-<profiles>
-    <profile>
-        <id>dev</id>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-devtools</artifactId>
-                <scope>runtime</scope>
-                <optional>true</optional>
-            </dependency>
-        </dependencies>
-    </profile>
-</profiles>
