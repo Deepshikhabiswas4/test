@@ -161,3 +161,90 @@ public class UserGuideServiceImpl implements UserGuideService {
     }
 }
 
+
+package com.tcs.CrsUserGuideService.service;
+
+import com.tcs.CrsUserGuideService.repository.UserGuideRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+import java.util.*;
+
+/**
+ * @author : v1018405
+ * @description : Get User Guide Data in the required format from DB
+ */
+@Service("UserGuideService")
+public class UserGuideServiceImpl implements UserGuideService {
+
+    private static final Logger log = LoggerFactory.getLogger(UserGuideServiceImpl.class);
+
+    @Autowired
+    private UserGuideRepository userGuideRepository;
+
+    @Override
+    public Map<String, Object> getUserGuideData(Map<String, Object> payload) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        List> userGuideData = new ArrayList<>();
+
+        try {
+            List> records = userGuideRepository.getUserGuideData();
+            int recordCount = (records != null) ? records.size() : 0;
+            log.info("userGuide records fetched from DB: {}", recordCount);
+
+            Map<String, Map<String, Map<String, Map<String, List<String>>>>> optionMap = new LinkedHashMap<>();
+
+            if (records != null) {
+                for (Map<String, Object> record : records) {
+                    if (record == null) {
+                        continue;
+                    }
+
+                    String option = Objects.toString(record.get("OPTION_NAME"), "");
+                    String head = Objects.toString(record.get("HEAD_NAME"), "");
+                    String subhead = Objects.toString(record.get("SUBHEAD_NAME"), "");
+                    Object rawValues = record.get("SUBHEAD_VALUES");
+
+                    List<String> valuesToAdd = new ArrayList<>();
+                    if (rawValues != null) {
+                        String subheadValuesString = rawValues.toString();
+                        if (!subheadValuesString.isBlank()) {
+                            valuesToAdd.addAll(Arrays.asList(subheadValuesString.split(",\\s*")));
+                        }
+                    }
+
+                    optionMap
+                            .computeIfAbsent(option, k -> new LinkedHashMap<>())
+                            .computeIfAbsent(head, k -> new LinkedHashMap<>())
+                            .computeIfAbsent("subhead", k -> new LinkedHashMap<>())
+                            .computeIfAbsent(subhead, k -> new ArrayList<>())
+                            .addAll(valuesToAdd);
+                }
+            }
+
+            optionMap.forEach((option, headMap) -> {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("option", option);
+                entry.put("head", headMap);
+                userGuideData.add(entry);
+            });
+
+            result.put("userGuideData", userGuideData);
+            result.put("status", true);
+            log.info("Data added to the result successfully : {}", result);
+        } catch (Exception e) {
+            log.error("Exception occurred while fetching user guide data: {}", e.getMessage(), e);
+            result.put("userGuideData", userGuideData);
+            result.put("status", false);
+        }
+
+        return result;
+    }
+
+    @Override
+    public List> getUserFaq() {
+        return userGuideRepository.getFaqs();
+    }
+}
